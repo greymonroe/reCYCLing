@@ -1,16 +1,15 @@
 Package: reCYCLing
 Type: Package
-Title: What the Package Does (Title Case)
+Title: Repeat Element Cyclical Evolutionary Simulations in Genomes
 Version: 0.1.0
 Authors@R: c(
     person(
-      "Jane", "Doe",
-      email = "jane@example.com",
+      "Grey", "Monroe",
+      email = "greymonroe@gmail.com",
       role = c("aut", "cre")
     )
   )
-Description: More about what it does (maybe more than one line).
-    Continuation lines should be indented.
-License: What license is it under?
+Description: For simulations of repetative element evolution: tandem repeats evolving through mutation and duplicaton.
+License: Cite please
 Encoding: UTF-8
 LazyData: true
