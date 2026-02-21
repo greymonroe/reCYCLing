@@ -1,193 +1,143 @@
-![](extra/logo.gif)
+# reCYCLing
 
-# reCYCLing  
-## Repeat Element Cyclical Evolutionary Simulations in Genomes
+![reCYCLing logo](man/figures/logo.png)
 
-**reCYCLing** is a small R toolkit for simulating the evolution of tandem repeat arrays (e.g., satellite DNA–like monomers) under:
-- **Local (tandem) duplication** of chunks
-- **Distal duplication** (copy–paste elsewhere to the right; optional inversion of the duplicated chunk)
-- **Chunk deletion**
-- **Per-base mutation** (substitutions by default; optional indels)
+**Repeat Element Cyclical Evolutionary Simulations in Genomes**
 
-It was built for internal use in the Monroe Lab and is currently a **beta / research** codebase: it works for our use-cases, but is still evolving and documentation is lightweight.
+Long-read sequencing is revealing repeat-rich genome features—centromeres, satellite arrays, and other tandem repeats—that were previously difficult to assemble and interpret. Understanding what we see in these regions often comes down to building intuition for how tandem arrays evolve under duplication, deletion, and mutation.
 
-For worked examples, see: **`extra/vignettecode.R`**.
+`reCYCLing` is an R toolkit for **simulating** the evolution of tandem repeat arrays (satellite-like monomers derived from a common ancestor) and for **analyzing** the resulting arrays using diagnostics that mirror how we interrogate real repeat architectures (e.g., arrays identified with TRASH-like workflows). A core analysis theme is leveraging **pairs of identical monomers** to study spatial structure and duplication signatures.
 
 ---
 
-## Installation (development / internal)
-
-This repository isn’t currently a polished package. Typical usage is just:
+## Installation
 
 ```r
-# from the repo root
-source("R/functions.R")
+# install.packages("devtools")
+devtools::install_github("greymonroe/reCYCLing")
 ```
-
-### Suggested R packages
-Some functions assume these are installed/available:
-
-- `data.table`
-- `ggplot2`
-- `patchwork`
-- `cowplot`
-- `scales`
-- `pbapply` (used by some helpers)
 
 ---
 
 ## Quick start
 
-Run a small simulation from a **given** ancestral monomer sequence, then plot a compact summary:
+Simulate a single replicate from a fixed ancestral monomer sequence (so results are reproducible), then generate core diagnostic plots.
 
 ```r
-source("R/functions.R")
+library(reCYCLing)
 
-# define a starting monomer (single repeat unit)
-startseq <- paste0(sample(c("A","C","G","T"), size = 178, replace = TRUE), collapse = "")
+# Define a fixed ancestral monomer so results are reproducible
+ancestor <- paste(sample(c("A","C","G","T"), 178, replace = TRUE), collapse = "")
 
-# simulate n replicates
-ps_results <- run_sim_ps(
+sim <- run_sim_ps(
+  n = 1,                    # number of replicates
+  init_l = 178,             # monomer length (bp)
+  init_k0 = 10,             # initial copy number
   init_sequence_type = "given",
-  ancestor_seq       = startseq,
-  init_l             = 178,
-  init_k0            = 10,
-  n                  = 5,
-  max_t              = 1e6,
-  mu_total           = 3e-5,
-  p_del_chunk        = 0
+  ancestor_seq = ancestor,
+  max_units = 10000,        # stop when array reaches this many monomers
+  max_t = 1e6,              # max generations (time cap)
+  mu_total = 5e-5,          # per-base mutation rate
+  p_local_dup = 4e-4,       # local duplication probability per unit per generation
+  p_distal_dup = 1e-5,      # distal duplication probability per unit per generation
+  p_del_chunk = 1e-5,       # chunk deletion probability per unit per generation
+  verbose = FALSE
 )
 
-# summarize replicate i
-plot_ps_summary(
-  ps_results, i = 1,
-  title = "mu = 3e-5",
-  rel_widths_bottom = c(1.2, 1, 1, 1),
-  rel_heights = c(3, 1)
-)
+plot_repeat_fingerprint(sim, i = 1, ptsize = 0.5)
+plot_pair_distances(sim, i = 1)
+plot_mutation_load(sim, i = 1)
 ```
 
-You can explore how different parameters affect the outcome by running multiple simulations (e.g., changing `mu_total`, turning off distal duplication, etc.)—see the vignette for patterns we’ve found useful.
+---
+
+## What `run_sim_ps()` returns
+
+`run_sim_ps()` returns a **named list with five elements**, each a list of length `n` (one entry per replicate):
+
+- `monomers_list`: final array as a `data.table` (one row per monomer; key columns include `num` position and `bponly` sequence)
+- `ps_list`: all **pairs of identical monomers** (`pairs_identical()` output), with positions `num1` and `num2`
+- `L_vec_list`: array length trajectory over generations
+- `H_vec_list`: Shannon entropy trajectory over generations
+- `N_vec_list`: unique-monomer-count trajectory over generations
+
+Example:
+
+```r
+mono <- sim$monomers_list[[1]]
+ps   <- sim$ps_list[[1]]
+
+head(mono)
+head(ps[, c("bponly","num1","num2")])
+
+# Quick summaries
+length(unique(mono$bponly))
+shannon_entropy(mono$bponly)
+```
 
 ---
 
-## Core user-facing functions
+## Core ideas and controls
 
-### `run_sim_ps()`: run repeat-array evolution simulations
+Each generation, the simulator applies four forces to an array of monomer units:
 
-`run_sim_ps()` is the main entry point. It runs `n` independent replicates, each evolving a tandem array of monomer “units” through generations until an array-size or time cap is reached.
+| Process | Controls |
+|---|---|
+| **Local duplication** | tandem copy–paste of a nearby chunk |
+| **Distal duplication** | copy–paste to a more distant position (optional inversion) |
+| **Chunk deletion** | removal of a consecutive block of monomers |
+| **Per-base mutation** | substitutions by default (optional indels) |
 
-**Returns** a list with:
-- `monomers_list`: list of per-replicate tables describing the final array (one row per unit)
-- `ps_list`: list of per-replicate “pairwise identical” tables (all pairs of identical monomers)
-- `L_vec_list`: list of length trajectories across generations (array copy number over time)
-- `H_vec_list`: list of Shannon entropy trajectories across generations
-- `N_vec_list`: list of unique-monomer-count trajectories across generations
+Key knobs you’ll typically adjust:
 
-**Key arguments (most commonly used):**
+- **Rates (per unit per generation):** `p_local_dup`, `p_distal_dup`, `p_del_chunk`
+- **Distal inversion:** `p_invert_distal`
+- **Mutation (per base per generation):** `mu_total` and optionally `p_sub`, `p_ins`, `p_del_bp`
+- **Chunk-size distributions:** `local_dist`, `distal_dist`, `del_dist`
 
-#### Replicates, stopping rules, and initial state
-- `n`: number of simulation replicates
-- `max_t`: maximum generations per replicate
-- `max_units`: stop if the array reaches this many units
-- `hard_cap`: safety stop if the array exceeds this many units
-- `init_l`: length (bp) of one monomer unit
-- `init_k0`: initial number of monomers in the array
-- `init_sequence_type`: `"random"` (generate an ancestral monomer) or `"given"`
-- `ancestor_seq`: required if `init_sequence_type="given"`; must have length `init_l`
+Chunk-size distributions are specified as lists, e.g.:
 
-#### Duplication and deletion rates (per unit per generation)
-- `p_local_dup`: probability a unit triggers a **local** (tandem) duplication event
-- `p_distal_dup`: probability a unit triggers a **distal** duplication event
-- `p_invert_distal`: probability a distal-duplicated chunk is reversed in unit order
-- `p_del_chunk`: probability a unit triggers a **deletion** event
+```r
+local_dist  <- list(type="gamma", shape=2, scale=15)
+distal_dist <- list(type="gamma", shape=2, scale=500)
+del_dist    <- list(type="geom",  prob=0.1)
+```
 
-#### Chunk-size distributions
-Chunk sizes are drawn from *distribution spec lists*:
-- `local_dist`: chunk-size distribution for local duplication
-- `distal_dist`: chunk-size distribution for distal duplication
-- `del_dist`: chunk-size distribution for deletion
-
-Each distribution spec is a list with a `type` and parameters. Supported `type` values include:
-- `"fixed"`: `list(type="fixed", value=10)`
-- `"poisson"`: `list(type="poisson", lambda=20)`
-- `"normal"`: `list(type="normal", mean=20, sd=5)`
-- `"geom"`: `list(type="geom", prob=0.1)`
-- `"unif"`: `list(type="unif", min=1, max=50)`
-- `"gamma"`: `list(type="gamma", shape=2, scale=15)` (or `rate=`)
-
-Chunk sizes are always coerced to an integer `>= 1` and clipped to what’s feasible at the sampled start position.
-
-#### Mutation model (per base per generation)
-- `mu_total`: per-base mutation probability (applied independently per position)
-- `p_sub`, `p_ins`, `p_del_bp`: relative probabilities of substitution / insertion / deletion (default is substitutions only)
-
-#### Other
-- `verbose`: print generation progress
+Supported `type` values include: `"fixed"`, `"poisson"`, `"normal"`, `"geom"`, `"unif"`, `"gamma"`.
 
 ---
 
-### `plot_ps_summary()`: one-figure overview for a replicate
+## Diagnostic plots
 
-`plot_ps_summary(ps_results, i=...)` produces a compact multi-panel diagnostic figure for one replicate:
+Each diagnostic view is available as a standalone plotting function:
 
-- **Repeat fingerprint**: dot-plot of all identical monomer pairs (a “self-similarity” view)
-- **Distance between identical pairs**: histogram of `|num1 - num2|` (log-scaled)
-- **Copy number distribution**: histogram of copies per unique monomer sequence (log-scaled)
-- **Mutation load distribution**: mismatches per monomer vs a consensus sequence
-- **Consensus support distribution**: per-position consensus proportion across the array
+- `plot_repeat_fingerprint()` — dot-plot of identical pairs (self-similarity / duplication structure)
+- `plot_pair_distances()` — distance distribution of identical pairs (local vs distal signature)
+- `plot_copy_numbers()` — copies per unique monomer sequence
+- `plot_mutation_load()` — mismatches per monomer relative to consensus
+- `plot_consensus_support()` — per-position consensus support across the array
+- `plot_ps_summary()` — combined multi-panel overview
 
-Useful arguments:
-- `title`: displayed above the fingerprint panel
-- `rel_widths_bottom`: adjust widths of the small panels
-- `rel_heights`: adjust fingerprint-vs-bottom-row height ratio
+Tip: `plot_mutation_load()` and `plot_consensus_support()` both use per-position counts; compute once and reuse:
 
----
-
-## Additional helpers you may use
-
-These functions are handy if you want to dig deeper than `plot_ps_summary()`:
-
-- `plot.repeat.fingerprint(ps, kb=..., rotate=FALSE, zoom=...)`  
-  Fingerprint (dot-plot) view of identical monomer pairs; supports zoom windows.
-
-- `pairs_identical(repeats_dt)`  
-  Compute the table of all identical monomer pairs. (This is what `run_sim_ps()` stores in `ps_list`.)
-
-- `counts_long_nogap(rawseqs)`  
-  Per-position symbol counts/proportions across aligned sequences; returns a long table and consensus.
-
-- `plot_circular_seqcounts(seqcounts)`  
-  Circular visualization of per-position base composition (alpha = proportion).
-
-- `get_sim_entropies(ps_results)`  
-  Quick summary table (per replicate) of Shannon entropy, total units, and unique monomer count.
+```r
+counts <- counts_long_nogap(sim$monomers_list[[1]]$bponly)
+plot_mutation_load(sim, i = 1, counts = counts)
+plot_consensus_support(sim, i = 1, counts = counts)
+```
 
 ---
 
-## Tips for interpreting output
+## Vignette
 
-- **High duplication + low mutation** tends to produce many identical monomers and dense fingerprints.
-- **Higher mutation** increases unique monomer diversity, often raising entropy and broadening the mutation-load distribution.
-- **Distal duplication** can create “off-diagonal” structure in fingerprints (depending on chunk sizes and insertion positions).
-- `L_vec_list`, `H_vec_list`, and `N_vec_list` are useful for plotting trajectories (growth, diversification, etc.) across generations.
+For a worked walkthrough and more examples:
 
----
-
-## Vignette / examples
-
-See **`extra/vignettecode.R`** for:
-- Parameter sweeps (e.g., varying `mu_total`)
-- Turning mechanisms on/off (e.g., set `p_distal_dup = 0`)
-- Example figures and interpretation patterns
+```r
+vignette("reCYCLing-intro")
+```
 
 ---
 
-## Status, feedback, and contributions
+## Notes
 
-This is a **beta** research tool. If you try it and have ideas (bug reports, feature requests, API suggestions), please:
-- open an Issue on the repository **Issues** page, or
-- email: **gmonroe@ucdavis.edu**
-
-We’re happy to accept feedback andcontributions—especially if it helps make the simulator easier for collaborators to use.
-
+This is a research codebase developed mainly for internal use in the Monroe Lab; it is evolving and documentation may change. Please feel free to try - contribute to Issues if you would like
