@@ -2,14 +2,25 @@ Package: reCYCLing
 Type: Package
 Title: Repeat Element Cyclical Evolutionary Simulations in Genomes
 Version: 0.1.0
-Authors@R: c(
-    person(
-      "Grey", "Monroe",
-      email = "greymonroe@gmail.com",
-      role = c("aut", "cre")
-    )
-  )
-Description: For simulations of repetative element evolution: tandem repeats evolving through mutation and duplicaton.
-License: Cite please
+Author: Grey Monroe [aut, cre]
+Maintainer: Grey Monroe <greymonroe@gmail.com>
+Description: Simulates the evolution of tandem repeat arrays (e.g., satellite
+    DNA-like monomers) through local duplication, distal duplication, chunk
+    deletion, and per-base mutation. Provides visualization tools for
+    repeat fingerprints, monomer diversity, and array composition.
+License: GPL-3
 Encoding: UTF-8
-LazyData: true
+Imports:
+    cowplot,
+    data.table,
+    ggplot2,
+    grid,
+    pbapply,
+    scales,
+    stats,
+    utils
+Suggests:
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr
+RoxygenNote: 7.3.3
