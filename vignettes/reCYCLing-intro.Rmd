@@ -43,22 +43,29 @@ forces each generation:
 library(reCYCLing)
 
 # Define a fixed ancestral monomer so results are reproducible
-ancestor <- paste(sample(c("A","C","G","T"), 30, replace = TRUE),
+ancestor <- paste(sample(c("A","C","G","T"), 178, replace = TRUE),
                   collapse = "")
 
 sim <- run_sim_ps(
   n                  = 1,         # one replicate
-  init_l             = 30,        # monomer length (bp)
+  init_l             = 178,        # monomer length (bp)
   init_k0            = 10,        # starting copy number
   init_sequence_type = "given",
   ancestor_seq       = ancestor,
-  max_units          = 500,       # stop when array reaches 500 monomers
-  mu_total           = 3e-5,      # per-base mutation rate
-  p_local_dup        = 0.00015,   # local duplication probability per unit
-  p_distal_dup       = 1.5e-6,    # distal duplication probability per unit
-  p_del_chunk        = 0,         # no deletions in this example
+  max_units          = 10000,       # stop when array reaches 10000 monomers
+  mu_total           = 5e-5,      # per-base mutation rate
+  p_local_dup        = 0.0004,   # local duplication probability per unit
+  p_distal_dup       = 1e-5,    # distal duplication probability per unit
+  p_del_chunk        = 1e-5,         # no deletions in this example
   verbose            = FALSE
 )
+
+# immediately plot repeat array (more on this plot later)
+plot_repeat_fingerprint(sim, i = 1, ptsize = 0.5)
+plot_pair_distances(sim, i = 1)
+plot_mutation_load(sim, i = 1)
+
+
 ```
 
 ---
