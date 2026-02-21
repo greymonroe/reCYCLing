@@ -1,6 +1,6 @@
 # reCYCLing
 
-![reCYCLing logo](man/figures/logo.png)
+![reCYCLing logo](extra/logo.gif)
 
 **Repeat Element Cyclical Evolutionary Simulations in Genomes**
 
