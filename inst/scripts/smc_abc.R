@@ -31,35 +31,36 @@ library(data.table)
 # ---- Configuration with defaults -------------------------------------------
 
 CONFIG <- list(
-  # Target summary statistics (what your real data looks like)
+  # Target summary statistics (from real data)
   target = list(
-    med_near   = log10(20),   # log10 of median near-distance (~20)
-    med_far    = log10(5000), # log10 of median far-distance (~5000)
-    near_frac  = 0.3,         # fraction of pairs that are near (<= threshold)
-    mean_load  = 10           # mean mismatches to consensus per monomer
+    med_near        = log10(20),   # log10 of median near-distance
+    med_far         = log10(5000), # log10 of median far-distance
+    near_frac       = 0.5,         # fraction of pairs below threshold
+    mean_load       = 10,          # mean mismatches to consensus
+    target_array_size = 20000      # expected array size (emergent)
   ),
-  near_far_threshold = 100,   # distance threshold separating near/far pairs
+  near_far_threshold = 500,        # distance threshold separating near/far
 
-  # Distance scaling: computed automatically from Gen 0 pilot batch.
-  # Each summary stat is normalized by its SD across the pilot particles,
-  # so the distance is unitless and each stat contributes proportionally.
+  # Molecular clock
+  ancestor_age_my   = 10,          # ancestor age in million years
+  gen_time_yr       = 10,          # years per generation
+  compression       = 1000,        # time compression factor
+  mu_per_base_real  = 5.6e-8,      # real per-base per-gen mutation rate
+  init_l            = 178,         # monomer length (bp)
+  init_k0           = 10,          # initial copy number
 
   # SMC-ABC algorithm settings
-  n_particles     = 200,     # particles per generation (all slots filled)
-  max_generations = 20,      # upper limit on generations
-  retention_frac  = 0.5,     # fraction of particles kept each generation
-  perturbation_sd = 0.3,     # perturbation scale (used for Gen 0 fallback)
+  n_particles     = 500,
+  max_generations = 20,
+  retention_frac  = 0.3,
+  perturbation_sd = 0.3,
 
   # Convergence detection
-  conv_tol       = 0.01,     # stop if median distance improves < 1%
-  conv_patience  = 3,        # must stall for this many consecutive gens
+  conv_tol       = 0.01,
+  conv_patience  = 3,
 
-  # Simulation settings
-  max_units   = 20000,       # grow array to this many monomers
-  max_t       = 50000,       # generation cap per simulation
-  sim_timeout = 30,          # seconds before killing a slow sim
-  init_l      = 30,          # monomer length (bp)
-  init_k0     = 10,          # initial copy number
+  # Simulation
+  sim_timeout = 30,
 
   # Output
   outdir = "results"
@@ -139,10 +140,9 @@ dir.create(CONFIG$outdir, showWarnings = FALSE, recursive = TRUE)
 # to these bounds — particles can explore beyond them freely.
 
 PARAMS <- list(
-  list(name = "p_local_dup",   lo = -6,   hi = -3.5, transform = function(x) 10^x),
-  list(name = "p_distal_dup",  lo = -3,   hi = -0.3, transform = function(x) 10^x),  # per-array
-  list(name = "p_del_chunk",   lo = -7,   hi = -4,   transform = function(x) 10^x),
-  list(name = "mu_total",      lo = -5,   hi = -2,   transform = function(x) 10^x),
+  list(name = "p_local_dup",   lo = -5,   hi = -3,   transform = function(x) 10^x),
+  list(name = "p_distal_dup",  lo = -2,   hi = -0.3, transform = function(x) 10^x),  # per-array
+  list(name = "p_del_chunk",   lo = -6,   hi = -4,   transform = function(x) 10^x),
   list(name = "local_shape",   lo = 0.5,  hi = 5,    transform = function(x) x),
   list(name = "local_scale",   lo = 1,    hi = 50,   transform = function(x) x),
   list(name = "distal_shape",  lo = 0.5,  hi = 5,    transform = function(x) x),
@@ -170,12 +170,12 @@ sample_prior_one <- function() {
   as.data.table(row)
 }
 
-params_to_args <- function(row) {
+params_to_args <- function(row, mu_total) {
   list(
     p_local_dup  = PARAMS[[1]]$transform(row$p_local_dup),
     p_distal_dup = PARAMS[[2]]$transform(row$p_distal_dup),
     p_del_chunk  = PARAMS[[3]]$transform(row$p_del_chunk),
-    mu_total     = PARAMS[[4]]$transform(row$mu_total),
+    mu_total     = mu_total,
     local_dist   = list(type = "gamma", shape = row$local_shape,
                         scale = row$local_scale),
     distal_dist  = list(type = "gamma", shape = row$distal_shape,
@@ -230,14 +230,17 @@ fit_2gauss <- function(x, max_iter = 100, max_n = 10000) {
 #' Uses setTimeLimit for wall-clock timeout (no forking).
 #' Includes early rejection checks before expensive summary stats.
 run_and_summarize <- function(row, config) {
-  sim_args <- params_to_args(row)
-  hard_cap <- min(config$max_units * 2L, 50000L)
+  mu_compressed <- config$mu_per_base_real * config$compression
+  sim_gens <- round(config$ancestor_age_my * 1e6 / config$gen_time_yr / config$compression)
+  sim_args <- params_to_args(row, mu_compressed)
+  target_size <- config$target$target_array_size
+  hard_cap <- as.integer(target_size * 3)
 
   sim <- tryCatch(
     {
       setTimeLimit(elapsed = config$sim_timeout, transient = TRUE)
       suppressWarnings(run_sim_ps(
-        max_units = config$max_units, max_t = config$max_t,
+        max_units = hard_cap, max_t = sim_gens,
         hard_cap = hard_cap,
         init_l = config$init_l, init_k0 = config$init_k0,
         p_local_dup  = sim_args$p_local_dup,
@@ -258,8 +261,20 @@ run_and_summarize <- function(row, config) {
 
   mono <- sim$monomers
 
-  # Reject absurdly large arrays (explosive dup rate blew past hard_cap)
-  if (nrow(mono) > config$max_units * 3) return(NULL)
+  # Reject extinct or exploded arrays
+  if (nrow(mono) < 50 || nrow(mono) > hard_cap) return(NULL)
+
+  # Mutation load gate: quick subsample check
+  sample_n <- min(200, nrow(mono))
+  sample_seqs <- mono$bponly[sample.int(nrow(mono), sample_n)]
+  ct_quick <- tryCatch(counts_long_nogap(sample_seqs), error = function(e) NULL)
+  if (!is.null(ct_quick)) {
+    cons_quick <- ct_quick[symbol == consensus][order(pos)]
+    load_quick <- mu_load_from_consensus(sample_seqs, cons_quick)
+    mean_load_est <- mean(load_quick)
+    if (mean_load_est > config$target$mean_load * 3 ||
+        mean_load_est < config$target$mean_load / 3) return(NULL)
+  }
 
   # --- Full summary statistics ---
   # Compute pairwise distances from sampled identical pairs directly,
@@ -312,10 +327,11 @@ run_and_summarize <- function(row, config) {
 
 compute_distance <- function(sim_stats, target, stat_scales = NULL) {
   diffs <- c(
-    med_near  = sim_stats$med_near  - target$med_near,
-    med_far   = sim_stats$med_far   - target$med_far,
-    near_frac = sim_stats$near_frac - target$near_frac,
-    mean_load = (sim_stats$mean_load - target$mean_load) / max(target$mean_load, 0.1)
+    med_near   = sim_stats$med_near  - target$med_near,
+    med_far    = sim_stats$med_far   - target$med_far,
+    near_frac  = sim_stats$near_frac - target$near_frac,
+    mean_load  = (sim_stats$mean_load - target$mean_load) / max(target$mean_load, 0.1),
+    array_size = (log10(sim_stats$n_units) - log10(target$target_array_size))
   )
   if (!is.null(stat_scales)) {
     diffs <- diffs / stat_scales
@@ -327,11 +343,13 @@ compute_distance <- function(sim_stats, target, stat_scales = NULL) {
 
 compute_stat_scales <- function(particles, target) {
   rel_load <- (particles$mean_load - target$mean_load) / max(target$mean_load, 0.1)
+  rel_size <- log10(particles$n_units) - log10(target$target_array_size)
   scales <- c(
-    log_mode1 = sd(particles$log_mode1, na.rm = TRUE),
-    log_mode2 = sd(particles$log_mode2, na.rm = TRUE),
-    weight1   = sd(particles$weight1, na.rm = TRUE),
-    mean_load = sd(rel_load, na.rm = TRUE)
+    med_near   = sd(particles$med_near, na.rm = TRUE),
+    med_far    = sd(particles$med_far, na.rm = TRUE),
+    near_frac  = sd(particles$near_frac, na.rm = TRUE),
+    mean_load  = sd(rel_load, na.rm = TRUE),
+    array_size = sd(rel_size, na.rm = TRUE)
   )
   scales[is.na(scales) | scales < 1e-10] <- 1
   scales
@@ -427,11 +445,16 @@ run_smc_abc <- function(config) {
       config$conv_tol * 100, "% improvement\n")
   cat("Max units:", config$max_units, "\n")
   cat("Timeout:", config$sim_timeout, "s per particle\n")
+  mu_compressed <- config$mu_per_base_real * config$compression
+  sim_gens <- round(config$ancestor_age_my * 1e6 / config$gen_time_yr / config$compression)
+  cat("Molecular clock: ancestor=", config$ancestor_age_my, "My, gen_time=",
+      config$gen_time_yr, "yr, compression=", config$compression, "\n")
+  cat("Effective mu:", signif(mu_compressed, 3), "| Sim generations:", sim_gens, "\n")
   cat("Targets: med_near=", 10^config$target$med_near,
       " med_far=", 10^config$target$med_far,
       " near_frac=", config$target$near_frac,
       " load=", config$target$mean_load,
-      " threshold=", config$near_far_threshold, "\n")
+      " array_size=", config$target$target_array_size, "\n")
   cat("Output:", config$outdir, "\n\n")
 
   # Track convergence
@@ -474,7 +497,7 @@ run_smc_abc <- function(config) {
   for (ri in seq_len(nrow(particles))) {
     particles[ri, distance := compute_distance(
       .SD, config$target, stat_scales),
-      .SDcols = c("med_near", "med_far", "near_frac", "mean_load")]
+      .SDcols = c("med_near", "med_far", "near_frac", "mean_load", "n_units")]
   }
   best_dist <- min(particles$distance)
   med_dist  <- median(particles$distance)
@@ -580,7 +603,7 @@ run_smc_abc <- function(config) {
   }
   top_display[, near := 10^med_near]
   top_display[, far := 10^med_far]
-  print(top_display[, .(p_local_dup, p_distal_dup, p_del_chunk, mu_total,
+  print(top_display[, .(p_local_dup, p_distal_dup, p_del_chunk,
                          local_shape, local_scale, distal_shape, distal_scale,
                          del_shape, del_scale,
                          near, far, near_frac, mean_load, distance)],

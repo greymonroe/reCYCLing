@@ -112,8 +112,9 @@ run_and_summarize_one <- function(row, sim_gens, init_l, init_k0,
   t0 <- proc.time()[3]
 
   # Run for fixed number of generations (molecular clock).
-  # max_units set very high — array size is emergent, not a target.
-  hard_cap <- 100000L
+  # Cap array size to avoid explosive growth eating all memory/time.
+  target_size <- if (!is.null(target)) target$target_array_size else 20000
+  hard_cap <- as.integer(target_size * 3)
 
   sim <- tryCatch(
     suppressWarnings(run_sim_ps(
