@@ -140,7 +140,7 @@ dir.create(CONFIG$outdir, showWarnings = FALSE, recursive = TRUE)
 
 PARAMS <- list(
   list(name = "p_local_dup",   lo = -4,   hi = -2,   transform = function(x) 10^x),
-  list(name = "p_distal_dup",  lo = -6,   hi = -3,   transform = function(x) 10^x),
+  list(name = "p_distal_dup",  lo = -3,   hi = -0.3, transform = function(x) 10^x),  # per-array
   list(name = "p_del_chunk",   lo = -6,   hi = -3,   transform = function(x) 10^x),
   list(name = "mu_total",      lo = -5,   hi = -2,   transform = function(x) 10^x),
   list(name = "local_shape",   lo = 0.5,  hi = 5,    transform = function(x) x),

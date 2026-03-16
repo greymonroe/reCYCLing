@@ -39,7 +39,7 @@ library(scales)
 
 PARAMS <- list(
   list(name = "p_local_dup",  lo = -4,  hi = -2,   transform = function(x) 10^x),
-  list(name = "p_distal_dup", lo = -6,  hi = -3,   transform = function(x) 10^x),
+  list(name = "p_distal_dup", lo = -3,  hi = -0.3, transform = function(x) 10^x),  # per-array (not per-unit)
   list(name = "p_del_chunk",  lo = -6,  hi = -3,   transform = function(x) 10^x),
   list(name = "local_shape",  lo = 0.5, hi = 5,    transform = function(x) x),
   list(name = "local_scale",  lo = 1,   hi = 50,   transform = function(x) x),
@@ -349,7 +349,8 @@ server <- function(input, output, session) {
     kept          = NULL,       # survivors from selection
     convergence   = data.table(gen = integer(), best = numeric(),
                                median = numeric(), n_valid = integer(),
-                               n_failed = integer(), n_timeout = integer()),
+                               n_failed = integer(), n_timeout = integer(),
+                               elapsed_s = numeric()),
     all_particles = list(),     # all gens' particles for posteriors
     best_sim      = NULL,       # stored sim result for best particle
     param_sds     = NULL,       # per-parameter perturbation SDs (adaptive)
@@ -440,11 +441,14 @@ server <- function(input, output, session) {
           best_d <- min(particles$distance)
           med_d  <- median(particles$distance)
 
+          gen_elapsed <- if (!is.na(state$gen_start_time))
+            round(proc.time()[3] - state$gen_start_time) else NA_real_
           state$convergence <- rbind(state$convergence,
             data.table(gen = gen, best = best_d, median = med_d,
                        n_valid = n_valid,
                        n_failed = state$n_failed,
-                       n_timeout = state$n_timeout))
+                       n_timeout = state$n_timeout,
+                       elapsed_s = gen_elapsed))
           state$all_particles[[gen + 1]] <- copy(particles)
 
           # Selection
@@ -617,19 +621,20 @@ server <- function(input, output, session) {
 
     conv <- copy(conv)
     conv[, n_fail_total := n_failed + n_timeout]
+    conv[, label := paste0(n_fail_total, "f / ", elapsed_s, "s")]
 
     ggplot(conv, aes(x = gen)) +
       geom_line(aes(y = median, colour = "Median"), linewidth = 1) +
       geom_point(aes(y = median, colour = "Median"), size = 2) +
       geom_line(aes(y = best, colour = "Best"), linewidth = 1) +
       geom_point(aes(y = best, colour = "Best"), size = 2) +
-      geom_text(aes(y = max(median) * 1.05, label = n_fail_total),
-                size = 2.5, colour = "grey40") +
+      geom_text(aes(y = max(median) * 1.08, label = label),
+                size = 2, colour = "grey40", angle = 30) +
       scale_colour_manual(values = c("Median" = "steelblue",
                                       "Best" = "firebrick")) +
-      theme_classic(base_size = 11) +
+      theme_classic(base_size = 10) +
       labs(x = "Generation", y = "Distance",
-           colour = NULL, title = "Convergence (numbers = failures)") +
+           colour = NULL, title = "Convergence (failures / time)") +
       theme(legend.position = c(0.8, 0.8),
             legend.background = element_rect(fill = "transparent"),
             legend.key = element_rect(fill = "transparent"))
@@ -656,23 +661,20 @@ server <- function(input, output, session) {
         med_near  = 10^valid$med_near,
         med_far   = 10^valid$med_far,
         near_frac = valid$near_frac,
-        mean_load = valid$mean_load,
-        n_units   = valid$n_units,
-        n_gens    = valid$n_gens
+        mean_load = valid$mean_load
       )
     })
     gen_dt <- rbindlist(gen_list[!sapply(gen_list, is.null)])
     if (nrow(gen_dt) == 0) return(ggplot() + theme_void())
 
     target_vals <- data.table(
-      stat = c("med_near", "med_far", "near_frac", "mean_load", "n_units", "n_gens"),
+      stat = c("med_near", "med_far", "near_frac", "mean_load"),
       target = c(10^target$med_near, 10^target$med_far,
-                 target$near_frac, target$mean_load, NA_real_, NA_real_)
+                 target$near_frac, target$mean_load)
     )
 
     melt_dt <- melt(gen_dt, id.vars = "gen",
-                    measure.vars = c("med_near", "med_far", "near_frac", "mean_load",
-                                     "n_units", "n_gens"),
+                    measure.vars = c("med_near", "med_far", "near_frac", "mean_load"),
                     variable.name = "stat", value.name = "value")
     melt_dt[, gen_f := factor(gen)]
 
@@ -721,8 +723,9 @@ server <- function(input, output, session) {
 
     gen_dt[, gen_f := factor(gen)]
 
-    # Rates (log scale)
-    melt_rates <- melt(gen_dt[, c("gen_f", rate_params), with = FALSE],
+    # Rates + diagnostics (log scale for rates)
+    diag_params <- c(rate_params, "n_units", "n_gens")
+    melt_rates <- melt(gen_dt[, c("gen_f", diag_params), with = FALSE],
                        id.vars = "gen_f", variable.name = "param", value.name = "value")
     p1 <- ggplot(melt_rates, aes(x = gen_f, y = value)) +
       geom_violin(fill = "darkorange", alpha = 0.4, scale = "width", linewidth = 0.3) +
@@ -731,7 +734,7 @@ server <- function(input, output, session) {
       scale_y_log10() +
       theme_classic(base_size = 9) +
       theme(strip.background = element_blank()) +
-      labs(x = "Generation", y = NULL, title = "Rate parameters across generations")
+      labs(x = "Generation", y = NULL, title = "Rates + diagnostics (n_units, n_gens)")
 
     # Shape/scale (linear)
     melt_shapes <- melt(gen_dt[, c("gen_f", shape_params), with = FALSE],

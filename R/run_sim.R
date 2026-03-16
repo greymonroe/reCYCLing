@@ -74,49 +74,40 @@
 }
 
 # Apply distal (copy-paste elsewhere) duplications.
+# p_distal_dup is a per-ARRAY per-generation probability (not per-unit),
+# modeling chromosome-level events like unequal crossover.
 .distal_duplication <- function(units, dirs, p_distal_dup, chunk_size_dist,
                                 p_invert_distal = 0.5) {
   k <- length(units)
-  if (k == 0) return(list(units = units, dirs = dirs))
+  if (k == 0 || runif(1) >= p_distal_dup) return(list(units = units, dirs = dirs))
 
-  triggers <- runif(k) < p_distal_dup
-  idxs     <- which(triggers)
-  if (length(idxs) == 0L) return(list(units = units, dirs = dirs))
+  # One distal duplication event per generation (at most)
+  i <- sample.int(k, 1L)
+  max_chunk <- k - i + 1L
+  chunk_size <- .sample_chunk_size(chunk_size_dist, max_k = max_chunk)
+  start <- i
+  end   <- min(start + chunk_size - 1L, k)
+  chunk      <- units[start:end]
+  chunk_dirs <- dirs[start:end]
 
-  for (i in rev(idxs)) {
-    current_k <- length(units)
-    if (i > current_k) next
-    max_chunk <- current_k - i + 1L
-    if (max_chunk <= 0) next
+  if (runif(1) < p_invert_distal) {
+    chunk      <- rev(chunk)
+    chunk_dirs <- ifelse(rev(chunk_dirs) == "+", "-", "+")
+  }
 
-    chunk_size   <- .sample_chunk_size(chunk_size_dist, max_k = max_chunk)
-    start        <- i
-    end          <- min(start + chunk_size - 1L, current_k)
-    chunk        <- units[start:end]
-    chunk_dirs   <- dirs[start:end]
-
-    inverted <- runif(1) < p_invert_distal
-    if (inverted) {
-      chunk      <- rev(chunk)
-      chunk_dirs <- ifelse(rev(chunk_dirs) == "+", "-", "+")
-    }
-
-    # Insert anywhere in the array (not just downstream of the source)
-    n_positions <- current_k + 1L
-    insert_after <- sample.int(n_positions, 1L) - 1L  # 0 = before position 1
-
-    if (insert_after == 0L) {
-      units <- c(chunk, units)
-      dirs  <- c(chunk_dirs, dirs)
-    } else if (insert_after == current_k) {
-      units <- c(units, chunk)
-      dirs  <- c(dirs, chunk_dirs)
-    } else {
-      units <- c(units[1:insert_after], chunk,
-                 units[(insert_after + 1L):current_k])
-      dirs  <- c(dirs[1:insert_after], chunk_dirs,
-                 dirs[(insert_after + 1L):current_k])
-    }
+  # Insert anywhere in the array
+  insert_after <- sample.int(k + 1L, 1L) - 1L
+  if (insert_after == 0L) {
+    units <- c(chunk, units)
+    dirs  <- c(chunk_dirs, dirs)
+  } else if (insert_after == k) {
+    units <- c(units, chunk)
+    dirs  <- c(dirs, chunk_dirs)
+  } else {
+    units <- c(units[1:insert_after], chunk,
+               units[(insert_after + 1L):k])
+    dirs  <- c(dirs[1:insert_after], chunk_dirs,
+               dirs[(insert_after + 1L):k])
   }
   list(units = units, dirs = dirs)
 }
@@ -445,8 +436,9 @@
 #'   Default gamma(shape=2, scale=15).
 #' @param p_local_dup Numeric. Per-unit per-generation probability of triggering
 #'   a local duplication event. Default 0.00015.
-#' @param p_distal_dup Numeric. Per-unit per-generation probability of
-#'   triggering a distal duplication event. Default 0.0000015.
+#' @param p_distal_dup Numeric. Per-array per-generation probability of
+#'   a distal duplication event (e.g., unequal crossover). At most one
+#'   event per generation. Default 0.1.
 #' @param p_invert_distal Numeric. Probability that a distal-duplicated chunk
 #'   is reversed in unit order before insertion. Default 0.5.
 #' @param p_del_chunk Numeric. Per-unit per-generation probability of
@@ -513,7 +505,7 @@ run_sim_ps <- function(
     distal_dist = list(type = "gamma", shape = 2, scale = 500),
     del_dist    = list(type = "gamma", shape = 2, scale = 15),
     p_local_dup          = 0.00015,
-    p_distal_dup         = 0.0000015,
+    p_distal_dup         = 0.1,
     p_invert_distal      = 0.5,
     p_del_chunk          = 0.000,
     mu_total             = 0.0001,

@@ -185,24 +185,18 @@ List sim_core_cpp(IntegerVector ancestor_seq_r,
         }
 
         // === DISTAL DUPLICATION ===
-        if (p_distal_dup > 0.0) {
+        // Per-ARRAY probability (not per-unit): models chromosome-level events
+        // like unequal crossover. At most one event per generation.
+        if (p_distal_dup > 0.0 && R::runif(0.0, 1.0) < p_distal_dup) {
             k = (int)arr.size();
-            std::vector<int> triggered;
-            for (int i = 0; i < k; i++) {
-                if (R::runif(0.0, 1.0) < p_distal_dup) {
-                    triggered.push_back(i);
-                }
-            }
-            for (int ti = (int)triggered.size() - 1; ti >= 0; ti--) {
-                int idx = triggered[ti];
-                int ck = (int)arr.size();
-                if (idx >= ck) continue;
-                int max_chunk = ck - idx;
-                if (max_chunk <= 0) continue;
+            if (k > 0) {
+                int idx = (int)(R::runif(0.0, 1.0) * k);
+                if (idx >= k) idx = k - 1;
+                int max_chunk = k - idx;
 
                 int chunk_size = sample_chunk_size(distal_dist, max_chunk);
                 int start = idx;
-                int end = std::min(start + chunk_size - 1, ck - 1);
+                int end = std::min(start + chunk_size - 1, k - 1);
 
                 // Materialize source
                 for (int j = start; j <= end; j++) {
@@ -224,7 +218,7 @@ List sim_core_cpp(IntegerVector ancestor_seq_r,
                 }
 
                 // Insert at random position (anywhere in array)
-                int n_positions = ck + 1;
+                int n_positions = k + 1;
                 int insert_at = (int)(R::runif(0.0, 1.0) * n_positions);
                 if (insert_at >= n_positions) insert_at = n_positions - 1;
 

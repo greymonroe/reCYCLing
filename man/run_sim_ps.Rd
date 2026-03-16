@@ -16,7 +16,7 @@ run_sim_ps(
   distal_dist = list(type = "gamma", shape = 2, scale = 500),
   del_dist = list(type = "gamma", shape = 2, scale = 15),
   p_local_dup = 0.00015,
-  p_distal_dup = 1.5e-06,
+  p_distal_dup = 0.1,
   p_invert_distal = 0.5,
   p_del_chunk = 0,
   mu_total = 1e-04,
@@ -60,8 +60,9 @@ Default gamma(shape=2, scale=15).}
 \item{p_local_dup}{Numeric. Per-unit per-generation probability of triggering
 a local duplication event. Default 0.00015.}
 
-\item{p_distal_dup}{Numeric. Per-unit per-generation probability of
-triggering a distal duplication event. Default 0.0000015.}
+\item{p_distal_dup}{Numeric. Per-array per-generation probability of
+a distal duplication event (e.g., unequal crossover). At most one
+event per generation. Default 0.1.}
 
 \item{p_invert_distal}{Numeric. Probability that a distal-duplicated chunk
 is reversed in unit order before insertion. Default 0.5.}
