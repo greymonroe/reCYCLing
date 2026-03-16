@@ -8,10 +8,10 @@ library(scales)
 # ============================================================================
 # POTENTIAL IMPROVEMENTS (not yet implemented)
 # ============================================================================
-# 1. Adaptive perturbation kernel: Use the empirical covariance matrix of
-#    accepted particles as the perturbation kernel (Beaumont 2009), instead
-#    of independent Gaussian perturbation per parameter. This lets correlated
-#    parameters move together and improves mixing.
+# 1. [DONE] Adaptive perturbation kernel: Per-parameter SD = 2 * empirical SD
+#    of accepted particles (Beaumont 2009). Replaces fixed 0.3 * range * 0.7^gen
+#    decay. Future: could extend to full covariance matrix to let correlated
+#    parameters move together.
 #
 # 2. Importance weights: In proper SMC-ABC, each particle carries a weight
 #    based on prior(theta) / perturbation_kernel(theta). We currently do
@@ -202,14 +202,11 @@ compute_stat_scales <- function(particles, target) {
   scales
 }
 
-perturb_particle <- function(particle, sd_scale) {
+perturb_particle <- function(particle, param_sds) {
   new <- copy(particle)
   for (j in seq_along(PARAMS)) {
     pname <- PARAMS[[j]]$name
-    range_j <- PARAMS[[j]]$hi - PARAMS[[j]]$lo
-    new[[pname]] <- new[[pname]] + rnorm(1, 0, sd_scale * range_j)
-    # No hard clamp — allow exploration beyond the initial prior range.
-    # Only enforce physical constraints (e.g. shape params must be positive).
+    new[[pname]] <- new[[pname]] + rnorm(1, 0, param_sds[[pname]])
   }
   # Enforce physical constraints: shape params > 0, scale params > 0
   for (pname in c("local_shape", "distal_shape", "del_shape"))
@@ -217,6 +214,25 @@ perturb_particle <- function(particle, sd_scale) {
   for (pname in c("local_scale", "distal_scale", "del_scale"))
     new[[pname]] <- max(0.1, new[[pname]])
   new
+}
+
+#' Compute adaptive perturbation SDs from the accepted particle population.
+#' Uses 2 * empirical SD per parameter (Beaumont 2009 optimal kernel).
+#' Falls back to prior-range-based SD for Gen 0.
+compute_param_sds <- function(kept, fallback_scale = 0.3) {
+  sds <- list()
+  for (j in seq_along(PARAMS)) {
+    pname <- PARAMS[[j]]$name
+    emp_sd <- if (!is.null(kept) && nrow(kept) >= 3)
+      sd(kept[[pname]], na.rm = TRUE) else NA_real_
+    if (is.na(emp_sd) || emp_sd < 1e-10) {
+      # Fallback: use fraction of prior range (Gen 0 or degenerate posterior)
+      sds[[pname]] <- fallback_scale * (PARAMS[[j]]$hi - PARAMS[[j]]$lo)
+    } else {
+      sds[[pname]] <- 2 * emp_sd
+    }
+  }
+  sds
 }
 
 # ============================================================================
@@ -327,7 +343,7 @@ server <- function(input, output, session) {
                                n_failed = integer(), n_timeout = integer()),
     all_particles = list(),     # all gens' particles for posteriors
     best_sim      = NULL,       # stored sim result for best particle
-    sd_scale      = 0.3,
+    param_sds     = NULL,       # per-parameter perturbation SDs (adaptive)
     stall_count   = 0L,
     last_particle_time = NA_real_,  # seconds taken by last particle
     n_failed      = 0L,             # failed attempts this generation
@@ -356,7 +372,8 @@ server <- function(input, output, session) {
                                      n_failed = integer(), n_timeout = integer())
     state$all_particles <- list()
     state$best_sim <- NULL
-    state$sd_scale <- input$perturbation_sd
+    # Initial perturbation SDs: use prior range * perturbation_scale for Gen 0
+    state$param_sds <- compute_param_sds(NULL, input$perturbation_sd)
     state$stall_count <- 0L
     state$last_particle_time <- NA_real_
     state$n_failed <- 0L
@@ -442,11 +459,12 @@ server <- function(input, output, session) {
             }
           }
 
-          # Prepare next generation
+          # Prepare next generation — compute adaptive perturbation SDs
+          # from the empirical spread of survivors (Beaumont 2009)
           state$generation <- gen + 1L
           state$particle_idx <- 0L
           state$particles <- NULL
-          state$sd_scale <- input$perturbation_sd * (0.7 ^ gen)
+          state$param_sds <- compute_param_sds(state$kept, input$perturbation_sd)
           state$n_failed <- 0L
           state$n_timeout <- 0L
           state$n_attempts <- 0L
@@ -464,7 +482,7 @@ server <- function(input, output, session) {
             return()
           }
           parent <- kept[sample.int(nrow(kept), 1), ..param_names]
-          proposed <- perturb_particle(parent, state$sd_scale)
+          proposed <- perturb_particle(parent, state$param_sds)
         }
 
         # Run simulation with wall-clock time limit (no forking).

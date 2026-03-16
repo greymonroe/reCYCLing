@@ -47,8 +47,7 @@ CONFIG <- list(
   n_particles     = 200,     # particles per generation (all slots filled)
   max_generations = 20,      # upper limit on generations
   retention_frac  = 0.5,     # fraction of particles kept each generation
-  perturbation_sd = 0.3,     # initial perturbation scale (shrinks each gen)
-  perturb_decay   = 0.7,     # multiply perturbation_sd by this each gen
+  perturbation_sd = 0.3,     # perturbation scale (used for Gen 0 fallback)
 
   # Convergence detection
   conv_tol       = 0.01,     # stop if median distance improves < 1%
@@ -84,7 +83,6 @@ while (i <= length(args)) {
   else if (a == "--init_k0")         { CONFIG$init_k0 <- as.integer(v) }
   else if (a == "--retention_frac")  { CONFIG$retention_frac <- as.numeric(v) }
   else if (a == "--perturbation_sd") { CONFIG$perturbation_sd <- as.numeric(v) }
-  else if (a == "--perturb_decay")   { CONFIG$perturb_decay <- as.numeric(v) }
   else if (a == "--conv_tol")        { CONFIG$conv_tol <- as.numeric(v) }
   else if (a == "--conv_patience")   { CONFIG$conv_patience <- as.integer(v) }
   # Target statistics
@@ -109,8 +107,8 @@ Algorithm settings:
   --particles NUM        Particles per generation (default: 200)
   --max_generations NUM  Max generations before stopping (default: 20)
   --retention_frac NUM   Fraction of particles kept each gen (default: 0.5)
-  --perturbation_sd NUM  Initial perturbation scale (default: 0.3)
-  --perturb_decay NUM    Perturbation decay per gen (default: 0.7)
+  --perturbation_sd NUM  Perturbation scale for Gen 0 fallback (default: 0.3)
+                         After Gen 0, perturbation adapts to empirical spread of survivors.
   --conv_tol NUM         Convergence tolerance, fraction (default: 0.01)
   --conv_patience NUM    Gens without improvement to stop (default: 3)
 
@@ -326,13 +324,11 @@ compute_stat_scales <- function(particles, target) {
   scales
 }
 
-perturb_particle <- function(particle, sd_scale) {
+perturb_particle <- function(particle, param_sds) {
   new <- copy(particle)
   for (j in seq_along(PARAMS)) {
     pname <- PARAMS[[j]]$name
-    range_j <- PARAMS[[j]]$hi - PARAMS[[j]]$lo
-    new[[pname]] <- new[[pname]] + rnorm(1, 0, sd_scale * range_j)
-    # No hard clamp — allow exploration beyond initial prior range.
+    new[[pname]] <- new[[pname]] + rnorm(1, 0, param_sds[[pname]])
   }
   # Enforce physical constraints only
   for (pname in c("local_shape", "distal_shape", "del_shape"))
@@ -340,6 +336,21 @@ perturb_particle <- function(particle, sd_scale) {
   for (pname in c("local_scale", "distal_scale", "del_scale"))
     new[[pname]] <- max(0.1, new[[pname]])
   new
+}
+
+compute_param_sds <- function(kept, fallback_scale = 0.3) {
+  sds <- list()
+  for (j in seq_along(PARAMS)) {
+    pname <- PARAMS[[j]]$name
+    emp_sd <- if (!is.null(kept) && nrow(kept) >= 3)
+      sd(kept[[pname]], na.rm = TRUE) else NA_real_
+    if (is.na(emp_sd) || emp_sd < 1e-10) {
+      sds[[pname]] <- fallback_scale * (PARAMS[[j]]$hi - PARAMS[[j]]$lo)
+    } else {
+      sds[[pname]] <- 2 * emp_sd
+    }
+  }
+  sds
 }
 
 # ---- Fill N valid particle slots (retrying failures) -------------------------
@@ -474,8 +485,8 @@ run_smc_abc <- function(config) {
                 10^best$log_mode1, 10^best$log_mode2,
                 best$weight1, best$mean_load, best$distance))
 
-    # Perturbation scale decreases each generation
-    sd_scale <- config$perturbation_sd * (config$perturb_decay ^ (gen - 1))
+    # Adaptive perturbation: SD per parameter = 2 * empirical SD of survivors
+    param_sds <- compute_param_sds(kept, config$perturbation_sd)
 
     # Fill all slots by perturbing random parents, retrying failures
     t0 <- proc.time()
@@ -483,7 +494,7 @@ run_smc_abc <- function(config) {
       config$n_particles,
       propose_fn = function() {
         parent <- kept[sample.int(nrow(kept), 1), ..param_names]
-        perturb_particle(parent, sd_scale)
+        perturb_particle(parent, param_sds)
       },
       config = config,
       stat_scales = stat_scales
