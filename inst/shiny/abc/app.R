@@ -37,6 +37,11 @@ library(scales)
 # ABC helper functions
 # ============================================================================
 
+# Helper: label with visible help icon that shows tooltip on hover
+help_label <- function(text, tooltip) {
+  tags$span(text, tags$span(class = "help-icon", title = tooltip, "?"))
+}
+
 # All 9 possible ABC parameters with defaults and prior ranges.
 # Which ones are actually fitted is controlled by checkboxes in the UI.
 ALL_PARAMS <- list(
@@ -309,6 +314,10 @@ ui <- fluidPage(
     .status-text { font-weight: bold; margin: 8px 0; }
     .target-box { background: #e8f4e8; padding: 8px; border-radius: 5px;
                   margin-bottom: 10px; }
+    .help-icon { display: inline-block; width: 14px; height: 14px;
+                 background: #888; color: white; border-radius: 50%;
+                 text-align: center; font-size: 10px; line-height: 14px;
+                 cursor: help; margin-left: 4px; vertical-align: middle; }
   "))),
 
   titlePanel("reCYCLing ABC Command Center"),
@@ -321,110 +330,104 @@ ui <- fluidPage(
       actionButton("stop", "Stop", class = "btn-danger"),
       htmlOutput("status"),
 
-      h4(tags$span("Target statistics", title = "These are the values measured from your REAL DATA — the empirical observations that the ABC algorithm tries to reproduce. Set each one based on your actual repeat array analysis.")),
+      h4(help_label("Target statistics", "These are the values measured from your REAL DATA — the empirical observations that the ABC algorithm tries to reproduce. Set each one based on your actual repeat array analysis.")),
       div(class = "target-box",
-        numericInput("target_med_near", tags$span("Median near-distance",
-          title = "Look at your empirical identical-pair distance distribution (the histogram of distances between monomers sharing the same sequence). Split it at the near/far threshold below. This value is the MEDIAN distance among the 'near' pairs (those closer than the threshold). It reflects the typical scale of local/tandem duplication events. For pistachio knobs, this is around 20 monomer units."), 20, min = 1),
-        numericInput("target_med_far", tags$span("Median far-distance",
-          title = "The MEDIAN distance among the 'far' pairs (those farther than the threshold). This reflects the typical scale of distal duplication events — how far apart copies land when an unequal crossover or similar mechanism duplicates a chunk to a distant position. For pistachio knobs, this is around 5000 monomer units."), 5000, min = 10),
-        numericInput("target_near_frac", tags$span("Fraction near-distance",
-          title = "What fraction of ALL identical monomer pairs have distances below the threshold? If 50% of pairs are 'near', the array has roughly equal contributions from local and distal duplication. Higher values mean local (tandem) duplication dominates; lower means distal events are more important for creating identical copies."), 0.5,
+        numericInput("target_med_near", help_label("Median near-distance", "Look at your empirical identical-pair distance distribution (the histogram of distances between monomers sharing the same sequence). Split it at the near/far threshold below. This value is the MEDIAN distance among the 'near' pairs (those closer than the threshold). It reflects the typical scale of local/tandem duplication events. For pistachio knobs, this is around 20 monomer units."), 20, min = 1),
+        numericInput("target_med_far", help_label("Median far-distance", "The MEDIAN distance among the 'far' pairs (those farther than the threshold). This reflects the typical scale of distal duplication events — how far apart copies land when an unequal crossover or similar mechanism duplicates a chunk to a distant position. For pistachio knobs, this is around 5000 monomer units."), 5000, min = 10),
+        numericInput("target_near_frac", help_label("Fraction near-distance", "What fraction of ALL identical monomer pairs have distances below the threshold? If 50% of pairs are 'near', the array has roughly equal contributions from local and distal duplication. Higher values mean local (tandem) duplication dominates; lower means distal events are more important for creating identical copies."), 0.5,
                      min = 0, max = 1, step = 0.05),
-        numericInput("target_load", tags$span("Mean mutation load",
-          title = "The average number of base-pair mismatches between each monomer and the array consensus sequence. This is your molecular clock readout — it tells you how much divergence has accumulated since monomers were last homogenized by duplication. Compute this from your real data using counts_long_nogap() + mu_load_from_consensus(). For pistachio knobs, this is around 10 mismatches per 178bp monomer."), 10, min = 0,
+        numericInput("target_load", help_label("Mean mutation load", "The average number of base-pair mismatches between each monomer and the array consensus sequence. This is your molecular clock readout — it tells you how much divergence has accumulated since monomers were last homogenized by duplication. Compute this from your real data using counts_long_nogap() + mu_load_from_consensus(). For pistachio knobs, this is around 10 mismatches per 178bp monomer."), 10, min = 0,
                      step = 1),
-        numericInput("target_array_size", tags$span("Target array size",
-          title = "How many monomer units are in your observed array? In the molecular clock framework, the simulation runs for a fixed number of generations and the resulting array size is EMERGENT — it depends on the balance of duplication and deletion. The ABC penalizes simulations that produce arrays far from this target size."), 20000, min = 100,
+        numericInput("target_array_size", help_label("Target array size", "How many monomer units are in your observed array? In the molecular clock framework, the simulation runs for a fixed number of generations and the resulting array size is EMERGENT — it depends on the balance of duplication and deletion. The ABC penalizes simulations that produce arrays far from this target size."), 20000, min = 100,
                      step = 1000),
-        numericInput("near_far_threshold", tags$span("Near/far threshold",
-          title = "The distance cutoff (in monomer units) that separates 'near' pairs from 'far' pairs. Look at your empirical distance histogram — there should be a valley between the local-duplication peak (near) and the distal-duplication peak (far). Set this threshold in that valley. For pistachio knobs, the valley is around 100-500 units."), 500,
+        numericInput("near_far_threshold", help_label("Near/far threshold", "The distance cutoff (in monomer units) that separates 'near' pairs from 'far' pairs. Look at your empirical distance histogram — there should be a valley between the local-duplication peak (near) and the distal-duplication peak (far). Set this threshold in that valley. For pistachio knobs, the valley is around 100-500 units."), 500,
                      min = 5, step = 50)
       ),
 
-      h4(tags$span("Molecular clock", title = "These settings anchor the simulation to real evolutionary time. The idea: if we know the ancestor age and mutation rate, we can calculate exactly how many generations of evolution to simulate. Mutation load then serves as an internal clock that validates the timing.")),
+      h4(help_label("Molecular clock", "These settings anchor the simulation to real evolutionary time. The idea: if we know the ancestor age and mutation rate, we can calculate exactly how many generations of evolution to simulate. Mutation load then serves as an internal clock that validates the timing.")),
       div(class = "target-box",
-        numericInput("ancestor_age_my", tags$span("Ancestor age (My)",
-          title = "How old is the common ancestor of these repeat arrays, in millions of years? This comes from phylogenetic analysis — e.g., if the repeat family is shared across species that diverged 10 million years ago, the ancestor is at least 10 My old. This determines the total number of generations of evolution."), 10,
+        numericInput("ancestor_age_my", help_label("Ancestor age (My)", "How old is the common ancestor of these repeat arrays, in millions of years? This comes from phylogenetic analysis — e.g., if the repeat family is shared across species that diverged 10 million years ago, the ancestor is at least 10 My old. This determines the total number of generations of evolution."), 10,
                      min = 0.1, step = 1),
-        numericInput("gen_time_yr", tags$span("Generation time (yr)",
-          title = "The average number of years per generation for your organism. For trees like pistachio, this is roughly the age to first reproduction (~10 years). For annual plants it would be 1. This converts millions of years into generations."), 10,
+        numericInput("gen_time_yr", help_label("Generation time (yr)", "The average number of years per generation for your organism. For trees like pistachio, this is roughly the age to first reproduction (~10 years). For annual plants it would be 1. This converts millions of years into generations."), 10,
                      min = 1, step = 1),
-        numericInput("compression", tags$span("Time compression",
-          title = "We cannot simulate millions of generations directly — it would take too long. Instead, we compress time: multiply all per-generation rates by this factor and divide the number of generations by the same factor. A compression of 1000 means: instead of simulating 1,000,000 real generations at real rates, we simulate 1,000 generations at 1000x rates. The result is mathematically equivalent (same mu*t product). Higher compression = faster but coarser."), 1000,
+        numericInput("compression", help_label("Time compression", "We cannot simulate millions of generations directly — it would take too long. Instead, we compress time: multiply all per-generation rates by this factor and divide the number of generations by the same factor. A compression of 1000 means: instead of simulating 1,000,000 real generations at real rates, we simulate 1,000 generations at 1000x rates. The result is mathematically equivalent (same mu*t product). Higher compression = faster but coarser."), 1000,
                      min = 1, step = 100),
-        numericInput("mu_per_base_real", tags$span("Real mutation rate",
-          title = "The actual per-base per-generation substitution rate for your organism. For most plants this is roughly 10^-8 to 10^-9 per base per generation. You can derive this from the target mutation load: mu = load / (monomer_length * real_generations). For pistachio: 10 / (178 * 1,000,000) = 5.6e-8. This value is multiplied by the compression factor for the simulation."),
+        numericInput("mu_per_base_real", help_label("Real mutation rate", "The actual per-base per-generation substitution rate for your organism. For most plants this is roughly 10^-8 to 10^-9 per base per generation. You can derive this from the target mutation load: mu = load / (monomer_length * real_generations). For pistachio: 10 / (178 * 1,000,000) = 5.6e-8. This value is multiplied by the compression factor for the simulation."),
                      5.6e-8, min = 1e-10, max = 1e-6, step = 1e-9),
-        numericInput("init_l", tags$span("Monomer length (bp)",
-          title = "Length of one repeat monomer in base pairs. Measure this from your actual sequence data. Affects how fast mutation load accumulates: longer monomers accumulate more mismatches per generation."), 178, min = 10, step = 10),
+        numericInput("init_l", help_label("Monomer length (bp)", "Length of one repeat monomer in base pairs. Measure this from your actual sequence data. Affects how fast mutation load accumulates: longer monomers accumulate more mismatches per generation."), 178, min = 10, step = 10),
         htmlOutput("clock_info")
       ),
 
-      h4(tags$span("Fitted parameters", title = "Check the box to fit a parameter via ABC. Unchecked parameters use the fixed value shown.")),
+      h4(help_label("Fitted parameters",
+        "Check the box to FIT a parameter via ABC (the algorithm will search for the best value). Uncheck to FIX it at the value shown (the simulation will always use that exact value). Default: only the 3 rate parameters are fitted. The chunk-size parameters are fixed because they are hard to identify from the summary statistics alone.")),
       div(class = "target-box",
         fluidRow(
           column(2, checkboxInput("fit_p_local_dup", NULL, TRUE)),
-          column(10, numericInput("fixed_p_local_dup", "Local dup rate (log10)", -3.4,
-                                  step = 0.1))
+          column(10, numericInput("fixed_p_local_dup",
+            help_label("Local dup rate (log10)", "Per-unit per-generation probability of tandem duplication (log10 scale). At 20K units, a value of -3.4 means ~8 dup events per generation. The ABC searches this range to match your observed near-distance distribution."),
+            -3.4, step = 0.1))
         ),
         fluidRow(
           column(2, checkboxInput("fit_p_distal_dup", NULL, TRUE)),
-          column(10, numericInput("fixed_p_distal_dup", "Distal dup rate (log10)", -1.3,
-                                  step = 0.1))
+          column(10, numericInput("fixed_p_distal_dup",
+            help_label("Distal dup rate (log10)", "Per-array per-generation probability of a distal duplication event like unequal crossover (log10 scale). A value of -1.3 means ~5% chance per generation. Controls the far-distance peak in the pair distance distribution."),
+            -1.3, step = 0.1))
         ),
         fluidRow(
           column(2, checkboxInput("fit_p_del_chunk", NULL, TRUE)),
-          column(10, numericInput("fixed_p_del_chunk", "Deletion rate (log10)", -5,
-                                  step = 0.1))
+          column(10, numericInput("fixed_p_del_chunk",
+            help_label("Deletion rate (log10)", "Per-unit per-generation probability of chunk deletion (log10 scale). Together with duplication rates, determines the equilibrium array size. Higher deletion = smaller arrays."),
+            -5, step = 0.1))
         ),
         fluidRow(
           column(2, checkboxInput("fit_local_shape", NULL, FALSE)),
-          column(10, numericInput("fixed_local_shape", "Local chunk shape", 2,
-                                  min = 0.1, step = 0.5))
+          column(10, numericInput("fixed_local_shape",
+            help_label("Local chunk shape", "Gamma distribution shape parameter for local (tandem) duplication chunk sizes. Shape=1 is exponential (mostly tiny, rare large). Shape=2-3 gives a peaked distribution. Controls the width of the near-distance peak."),
+            2, min = 0.1, step = 0.5))
         ),
         fluidRow(
           column(2, checkboxInput("fit_local_scale", NULL, FALSE)),
-          column(10, numericInput("fixed_local_scale", "Local chunk scale", 15,
-                                  min = 1, step = 5))
+          column(10, numericInput("fixed_local_scale",
+            help_label("Local chunk scale", "Gamma distribution scale parameter for local duplication. The mean chunk size = shape * scale. With shape=2, scale=15: mean chunk = 30 units, mode = 15 units."),
+            15, min = 1, step = 5))
         ),
         fluidRow(
           column(2, checkboxInput("fit_distal_shape", NULL, FALSE)),
-          column(10, numericInput("fixed_distal_shape", "Distal chunk shape", 2,
-                                  min = 0.1, step = 0.5))
+          column(10, numericInput("fixed_distal_shape",
+            help_label("Distal chunk shape", "Gamma shape for distal duplication chunk sizes. Controls how variable the sizes of crossover-duplicated chunks are."),
+            2, min = 0.1, step = 0.5))
         ),
         fluidRow(
           column(2, checkboxInput("fit_distal_scale", NULL, FALSE)),
-          column(10, numericInput("fixed_distal_scale", "Distal chunk scale", 2000,
-                                  min = 10, step = 100))
+          column(10, numericInput("fixed_distal_scale",
+            help_label("Distal chunk scale", "Gamma scale for distal duplication. With shape=2, scale=2000: mean chunk = 4000 units. This determines the scale of the far-distance peak — larger values spread identical pairs farther apart."),
+            2000, min = 10, step = 100))
         ),
         fluidRow(
           column(2, checkboxInput("fit_del_shape", NULL, FALSE)),
-          column(10, numericInput("fixed_del_shape", "Del chunk shape", 2,
-                                  min = 0.1, step = 0.5))
+          column(10, numericInput("fixed_del_shape",
+            help_label("Del chunk shape", "Gamma shape for deletion chunk sizes. Controls variability of how much material is removed per deletion event."),
+            2, min = 0.1, step = 0.5))
         ),
         fluidRow(
           column(2, checkboxInput("fit_del_scale", NULL, FALSE)),
-          column(10, numericInput("fixed_del_scale", "Del chunk scale", 15,
-                                  min = 1, step = 5))
+          column(10, numericInput("fixed_del_scale",
+            help_label("Del chunk scale", "Gamma scale for deletion. With shape=2, scale=15: mean deletion = 30 units. Larger values = more aggressive deletion per event."),
+            15, min = 1, step = 5))
         )
       ),
 
-      h4(tags$span("Algorithm", title = "Controls for the SMC-ABC (Sequential Monte Carlo Approximate Bayesian Computation) inference. The algorithm works like evolution: a population of candidate parameter sets ('particles') is proposed, scored against your data, and the best are selected and mutated to form the next generation.")),
-      numericInput("n_particles", tags$span("Particles per generation",
-        title = "Each 'particle' is one complete set of simulation parameters (duplication rates, chunk sizes, etc.) that gets tested by running a full simulation and comparing the result to your target data. More particles = better coverage of parameter space per generation, but each one takes time to simulate. Think of it like population size in a genetic algorithm — larger populations find the optimum faster but cost more per generation. 200-500 is typical."), 500,
+      h4(help_label("Algorithm", "Controls for the SMC-ABC (Sequential Monte Carlo Approximate Bayesian Computation) inference. The algorithm works like evolution: a population of candidate parameter sets ('particles') is proposed, scored against your data, and the best are selected and mutated to form the next generation.")),
+      numericInput("n_particles", help_label("Particles per generation", "Each 'particle' is one complete set of simulation parameters (duplication rates, chunk sizes, etc.) that gets tested by running a full simulation and comparing the result to your target data. More particles = better coverage of parameter space per generation, but each one takes time to simulate. Think of it like population size in a genetic algorithm — larger populations find the optimum faster but cost more per generation. 200-500 is typical."), 500,
                    min = 10, step = 50),
-      numericInput("max_generations", tags$span("Max ABC iterations",
-        title = "How many rounds of propose-simulate-select-perturb to run. This is NOT the number of generations in the biological simulation — it is how many times the ABC algorithm cycles through its population of candidate parameter sets. Each ABC iteration: (1) proposes N parameter sets, (2) runs a simulation for each, (3) keeps the best fraction, (4) perturbs them to make the next round. More iterations = more refinement, but diminishing returns after convergence. 10-30 is typical."), 10, min = 1),
-      sliderInput("retention_frac", tags$span("Retention fraction",
-        title = "After each ABC iteration, what fraction of the particles (parameter sets) are kept as 'survivors'? The rest are discarded. Setting this to 0.3 means: keep the best 30%, throw away the worst 70%, then generate new candidates by slightly modifying the survivors. Lower = more aggressive selection (converges faster but may miss good solutions). Higher = more conservative (explores more but converges slowly). 0.3-0.5 is typical."), 0.3,
+      numericInput("max_generations", help_label("Max ABC iterations", "How many rounds of propose-simulate-select-perturb to run. This is NOT the number of generations in the biological simulation — it is how many times the ABC algorithm cycles through its population of candidate parameter sets. Each ABC iteration: (1) proposes N parameter sets, (2) runs a simulation for each, (3) keeps the best fraction, (4) perturbs them to make the next round. More iterations = more refinement, but diminishing returns after convergence. 10-30 is typical."), 10, min = 1),
+      sliderInput("retention_frac", help_label("Retention fraction", "After each ABC iteration, what fraction of the particles (parameter sets) are kept as 'survivors'? The rest are discarded. Setting this to 0.3 means: keep the best 30%, throw away the worst 70%, then generate new candidates by slightly modifying the survivors. Lower = more aggressive selection (converges faster but may miss good solutions). Higher = more conservative (explores more but converges slowly). 0.3-0.5 is typical."), 0.3,
                   min = 0.1, max = 0.9, step = 0.05),
-      sliderInput("perturbation_sd", tags$span("Initial exploration width",
-        title = "In the first ABC iteration (Gen 0), parameters are sampled uniformly from the prior range. In subsequent iterations, new particles are created by taking a survivor and adding random noise. This slider controls how much noise is added in Gen 0, as a fraction of the prior range. After Gen 0, the noise adapts automatically to the spread of the survivors (Beaumont 2009 adaptive kernel). 0.3 = each parameter can shift by about 30% of its range per step."), 0.3,
+      sliderInput("perturbation_sd", help_label("Initial exploration width", "In the first ABC iteration (Gen 0), parameters are sampled uniformly from the prior range. In subsequent iterations, new particles are created by taking a survivor and adding random noise. This slider controls how much noise is added in Gen 0, as a fraction of the prior range. After Gen 0, the noise adapts automatically to the spread of the survivors (Beaumont 2009 adaptive kernel). 0.3 = each parameter can shift by about 30% of its range per step."), 0.3,
                   min = 0.05, max = 0.5, step = 0.05),
 
-      h4(tags$span("Simulation", title = "Settings for each individual simulation run within the ABC")),
-      numericInput("sim_timeout", tags$span("Per-simulation timeout (sec)",
-        title = "Maximum wall-clock time allowed for a single simulation. If a particular combination of parameters produces a simulation that runs extremely slowly (e.g., explosive growth creating millions of monomers), it will be killed after this many seconds and counted as a failure. Increase this if you are running very large or very long simulations."), 30,
+      h4(help_label("Simulation", "Settings for each individual simulation run within the ABC")),
+      numericInput("sim_timeout", help_label("Per-simulation timeout (sec)", "Maximum wall-clock time allowed for a single simulation. If a particular combination of parameters produces a simulation that runs extremely slowly (e.g., explosive growth creating millions of monomers), it will be killed after this many seconds and counted as a failure. Increase this if you are running very large or very long simulations."), 30,
                    min = 1, max = 300, step = 5)
     ),
 
