@@ -276,7 +276,7 @@ ui <- fluidPage(
       numericInput("max_generations", "Max generations", 10, min = 1),
       sliderInput("retention_frac", "Retention fraction", 0.5,
                   min = 0.1, max = 0.9, step = 0.05),
-      sliderInput("perturbation_sd", "Perturbation scale", 0.3,
+      sliderInput("perturbation_sd", "Initial perturbation (Gen 0 only)", 0.3,
                   min = 0.05, max = 0.5, step = 0.05),
 
       h4("Simulation"),
@@ -746,11 +746,22 @@ server <- function(input, output, session) {
     n_show <- min(10, nrow(valid))
     top <- valid[seq_len(n_show)]
     data.frame(
-      rank      = seq_len(n_show),
-      distance  = round(top$distance, 3),
-      mode1     = round(10^top$log_mode1),
-      mode2     = round(10^top$log_mode2),
-      mean_load = round(top$mean_load, 1)
+      rank        = seq_len(n_show),
+      distance    = round(top$distance, 3),
+      mode1       = round(10^top$log_mode1),
+      mode2       = round(10^top$log_mode2),
+      weight1     = round(top$weight1, 2),
+      mean_load   = round(top$mean_load, 1),
+      p_local     = signif(10^top$p_local_dup, 2),
+      p_distal    = signif(10^top$p_distal_dup, 2),
+      p_del       = signif(10^top$p_del_chunk, 2),
+      mu          = signif(10^top$mu_total, 2),
+      local_shp   = round(top$local_shape, 1),
+      local_scl   = round(top$local_scale, 1),
+      distal_shp  = round(top$distal_shape, 1),
+      distal_scl  = round(top$distal_scale, 0),
+      del_shp     = round(top$del_shape, 1),
+      del_scl     = round(top$del_scale, 1)
     )
   }, digits = 3)
 
