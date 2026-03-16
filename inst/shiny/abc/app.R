@@ -106,17 +106,18 @@ fit_2gauss <- function(x, max_iter = 100, max_n = 10000) {
   else list(log_mode1 = mu1, log_mode2 = mu2, weight1 = w1)
 }
 
-run_and_summarize_one <- function(row, max_units, max_t, init_l, init_k0,
+run_and_summarize_one <- function(row, sim_gens, init_l, init_k0,
                                   sim_timeout, target = NULL, mu_total = 1e-4) {
   sim_args <- params_to_args(row, mu_total)
   t0 <- proc.time()[3]
 
-  # Use a reduced hard_cap to prevent memory blowup in the Shiny context
-  hard_cap <- min(max_units * 2L, 50000L)
+  # Run for fixed number of generations (molecular clock).
+  # max_units set very high — array size is emergent, not a target.
+  hard_cap <- 100000L
 
   sim <- tryCatch(
     suppressWarnings(run_sim_ps(
-      max_units = max_units, max_t = max_t, hard_cap = hard_cap,
+      max_units = hard_cap, max_t = sim_gens, hard_cap = hard_cap,
       init_l = init_l, init_k0 = init_k0,
       p_local_dup = sim_args$p_local_dup, p_distal_dup = sim_args$p_distal_dup,
       p_del_chunk = sim_args$p_del_chunk, mu_total = sim_args$mu_total,
@@ -133,8 +134,8 @@ run_and_summarize_one <- function(row, max_units, max_t, init_l, init_k0,
   mono <- sim$monomers
   n_gens <- length(sim$L_vec)
 
-  # Reject absurdly large arrays (explosive dup rate blew past hard_cap in one step)
-  if (nrow(mono) > max_units * 3)
+  # Reject if array went extinct or got absurdly large
+  if (nrow(mono) < 50 || nrow(mono) > hard_cap)
     return(list(stats = NULL, sim = NULL, elapsed = elapsed))
 
   # --- Full summary statistics ---
@@ -208,17 +209,16 @@ run_and_summarize_one <- function(row, max_units, max_t, init_l, init_k0,
 
 compute_distance <- function(sim_stats, target, stat_scales = NULL) {
   diffs <- c(
-    med_near  = sim_stats$med_near  - target$med_near,
-    med_far   = sim_stats$med_far   - target$med_far,
-    near_frac = sim_stats$near_frac - target$near_frac,
-    mean_load = (sim_stats$mean_load - target$mean_load) / max(target$mean_load, 0.1)
+    med_near   = sim_stats$med_near  - target$med_near,
+    med_far    = sim_stats$med_far   - target$med_far,
+    near_frac  = sim_stats$near_frac - target$near_frac,
+    mean_load  = (sim_stats$mean_load - target$mean_load) / max(target$mean_load, 0.1),
+    array_size = (log10(sim_stats$n_units) - log10(target$target_array_size))
   )
   if (!is.null(stat_scales)) {
     diffs <- diffs / stat_scales
   }
-  # Blended distance: Euclidean (rewards overall improvement) +
-  # max deviation (penalizes ignoring any single stat).
-  # This prevents the ABC from cherry-picking one stat to optimize.
+  # Blended: Euclidean + max deviation (prevents cherry-picking one stat)
   euclidean <- sqrt(mean(diffs^2))
   worst     <- max(abs(diffs))
   0.5 * euclidean + 0.5 * worst
@@ -226,11 +226,13 @@ compute_distance <- function(sim_stats, target, stat_scales = NULL) {
 
 compute_stat_scales <- function(particles, target) {
   rel_load <- (particles$mean_load - target$mean_load) / max(target$mean_load, 0.1)
+  rel_size <- log10(particles$n_units) - log10(target$target_array_size)
   scales <- c(
-    med_near  = sd(particles$med_near, na.rm = TRUE),
-    med_far   = sd(particles$med_far, na.rm = TRUE),
-    near_frac = sd(particles$near_frac, na.rm = TRUE),
-    mean_load = sd(rel_load, na.rm = TRUE)
+    med_near   = sd(particles$med_near, na.rm = TRUE),
+    med_far    = sd(particles$med_far, na.rm = TRUE),
+    near_frac  = sd(particles$near_frac, na.rm = TRUE),
+    mean_load  = sd(rel_load, na.rm = TRUE),
+    array_size = sd(rel_size, na.rm = TRUE)
   )
   scales[is.na(scales) | scales < 1e-10] <- 1
   scales
@@ -303,8 +305,24 @@ ui <- fluidPage(
                      min = 0, max = 1, step = 0.05),
         numericInput("target_load", "Mean mutation load", 10, min = 0,
                      step = 1),
+        numericInput("target_array_size", "Target array size", 20000, min = 100,
+                     step = 1000),
         numericInput("near_far_threshold", "Near/far threshold (units)", 500,
                      min = 5, step = 50)
+      ),
+
+      h4("Molecular clock"),
+      div(class = "target-box",
+        numericInput("ancestor_age_my", "Ancestor age (million years)", 10,
+                     min = 0.1, step = 1),
+        numericInput("gen_time_yr", "Generation time (years)", 10,
+                     min = 1, step = 1),
+        numericInput("compression", "Time compression factor", 1000,
+                     min = 1, step = 100),
+        numericInput("mu_per_base_real", "Real mutation rate (per base/gen)",
+                     5.6e-8, min = 1e-10, max = 1e-6, step = 1e-9),
+        numericInput("init_l", "Monomer length (bp)", 178, min = 10, step = 10),
+        htmlOutput("clock_info")
       ),
 
       h4("Algorithm"),
@@ -317,14 +335,8 @@ ui <- fluidPage(
                   min = 0.05, max = 0.5, step = 0.05),
 
       h4("Simulation"),
-      numericInput("mu_total", "Mutation rate (per base per gen)", 5e-5,
-                   min = 1e-8, max = 1e-2, step = 1e-5),
-      numericInput("max_units", "Max array units", 20000, min = 500,
-                   step = 1000),
-      numericInput("max_t", "Max generations per sim", 20000,
-                   min = 100, step = 1000),
-      numericInput("sim_timeout", "Per-particle timeout (sec)", 10,
-                   min = 1, max = 120, step = 1)
+      numericInput("sim_timeout", "Per-particle timeout (sec)", 30,
+                   min = 1, max = 300, step = 5)
     ),
 
     mainPanel(
@@ -389,11 +401,33 @@ server <- function(input, output, session) {
     stat_scales   = NULL            # SD of each summary stat (from Gen 0 pilot)
   )
 
+  # Derived clock values
+  get_clock <- reactive({
+    real_gens <- input$ancestor_age_my * 1e6 / input$gen_time_yr
+    sim_gens <- round(real_gens / input$compression)
+    mu_compressed <- input$mu_per_base_real * input$compression
+    expected_load <- mu_compressed * input$init_l * sim_gens
+    list(real_gens = real_gens, sim_gens = sim_gens,
+         mu_compressed = mu_compressed, expected_load = expected_load)
+  })
+
+  output$clock_info <- renderUI({
+    ck <- get_clock()
+    HTML(paste0(
+      '<small style="color: #555;">',
+      'Real gens: ', format(ck$real_gens, big.mark = ","),
+      '<br>Sim gens: ', format(ck$sim_gens, big.mark = ","),
+      '<br>Effective mu: ', signif(ck$mu_compressed, 3),
+      '<br>Expected load: ', round(ck$expected_load, 1),
+      '</small>'))
+  })
+
   get_target <- reactive({
     list(med_near  = log10(input$target_med_near),
          med_far   = log10(input$target_med_far),
          near_frac = input$target_near_frac,
          mean_load = input$target_load,
+         target_array_size = input$target_array_size,
          near_far_threshold = input$near_far_threshold)
   })
 
@@ -460,7 +494,7 @@ server <- function(input, output, session) {
             for (ri in seq_len(nrow(particles))) {
               particles[ri, distance := compute_distance(
                 .SD, target, state$stat_scales),
-                .SDcols = c("med_near", "med_far", "near_frac", "mean_load")]
+                .SDcols = c("med_near", "med_far", "near_frac", "mean_load", "n_units")]
             }
             state$particles <- particles
           }
@@ -532,13 +566,12 @@ server <- function(input, output, session) {
         res <- tryCatch(
           run_and_summarize_one(
             proposed,
-            max_units   = input$max_units,
-            max_t       = input$max_t,
-            init_l      = 178L,
+            sim_gens    = get_clock()$sim_gens,
+            init_l      = input$init_l,
             init_k0     = 10L,
             sim_timeout = timeout,
             target      = target,
-            mu_total    = input$mu_total
+            mu_total    = get_clock()$mu_compressed
           ),
           error = function(e) {
             list(stats = NULL, sim = NULL, elapsed = NA_real_)
@@ -684,24 +717,26 @@ server <- function(input, output, session) {
       valid <- p[is.finite(distance)]
       if (nrow(valid) == 0) return(NULL)
       data.table(
-        gen       = i - 1L,
-        med_near  = 10^valid$med_near,
-        med_far   = 10^valid$med_far,
-        near_frac = valid$near_frac,
-        mean_load = valid$mean_load
+        gen        = i - 1L,
+        med_near   = 10^valid$med_near,
+        med_far    = 10^valid$med_far,
+        near_frac  = valid$near_frac,
+        mean_load  = valid$mean_load,
+        array_size = valid$n_units
       )
     })
     gen_dt <- rbindlist(gen_list[!sapply(gen_list, is.null)])
     if (nrow(gen_dt) == 0) return(ggplot() + theme_void())
 
     target_vals <- data.table(
-      stat = c("med_near", "med_far", "near_frac", "mean_load"),
+      stat = c("med_near", "med_far", "near_frac", "mean_load", "array_size"),
       target = c(10^target$med_near, 10^target$med_far,
-                 target$near_frac, target$mean_load)
+                 target$near_frac, target$mean_load, target$target_array_size)
     )
 
     melt_dt <- melt(gen_dt, id.vars = "gen",
-                    measure.vars = c("med_near", "med_far", "near_frac", "mean_load"),
+                    measure.vars = c("med_near", "med_far", "near_frac",
+                                     "mean_load", "array_size"),
                     variable.name = "stat", value.name = "value")
     melt_dt[, gen_f := factor(gen)]
 
@@ -815,13 +850,15 @@ server <- function(input, output, session) {
     row <- valid[rank]
 
     withProgress(message = "Re-running best particle...", value = 0.3, {
-      sim_args <- params_to_args(row, input$mu_total)
+      ck <- get_clock()
+      sim_args <- params_to_args(row, ck$mu_compressed)
       sim <- suppressWarnings(run_sim_ps(
-        max_units = input$max_units, init_l = 178, init_k0 = 10,
+        max_units = 100000, max_t = ck$sim_gens, init_l = input$init_l,
+        init_k0 = 10,
         p_local_dup = sim_args$p_local_dup,
         p_distal_dup = sim_args$p_distal_dup,
         p_del_chunk = sim_args$p_del_chunk,
-        mu_total = input$mu_total,
+        mu_total = ck$mu_compressed,
         local_dist = sim_args$local_dist,
         distal_dist = sim_args$distal_dist,
         del_dist = sim_args$del_dist,
