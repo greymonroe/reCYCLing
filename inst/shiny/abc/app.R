@@ -297,45 +297,61 @@ ui <- fluidPage(
       actionButton("stop", "Stop", class = "btn-danger"),
       htmlOutput("status"),
 
-      h4("Target statistics"),
+      h4(tags$span("Target statistics", title = "Observed values from real data that the ABC tries to match")),
       div(class = "target-box",
-        numericInput("target_med_near", "Median near-distance", 20, min = 1),
-        numericInput("target_med_far", "Median far-distance", 5000, min = 10),
-        numericInput("target_near_frac", "Fraction near-distance", 0.5,
+        numericInput("target_med_near", tags$span("Median near-distance",
+          title = "Median distance (in units) between identical pairs that are closer than the threshold. From your empirical distance distribution."), 20, min = 1),
+        numericInput("target_med_far", tags$span("Median far-distance",
+          title = "Median distance between identical pairs farther than the threshold. Reflects distal duplication scale."), 5000, min = 10),
+        numericInput("target_near_frac", tags$span("Fraction near-distance",
+          title = "What fraction of all identical pairs are closer than the threshold? Higher = more local duplication dominance."), 0.5,
                      min = 0, max = 1, step = 0.05),
-        numericInput("target_load", "Mean mutation load", 10, min = 0,
+        numericInput("target_load", tags$span("Mean mutation load",
+          title = "Average number of mismatches per monomer relative to the consensus sequence. Constrained by the molecular clock."), 10, min = 0,
                      step = 1),
-        numericInput("target_array_size", "Target array size", 20000, min = 100,
+        numericInput("target_array_size", tags$span("Target array size",
+          title = "Expected number of monomers in the array. Emerges from the balance of duplication and deletion."), 20000, min = 100,
                      step = 1000),
-        numericInput("near_far_threshold", "Near/far threshold (units)", 500,
+        numericInput("near_far_threshold", tags$span("Near/far threshold",
+          title = "Distance cutoff (in units) separating 'near' (local dup) from 'far' (distal dup) pairs. Set based on the valley in your empirical distance distribution."), 500,
                      min = 5, step = 50)
       ),
 
-      h4("Molecular clock"),
+      h4(tags$span("Molecular clock", title = "Grounds the simulation in real evolutionary time using fossil/phylogenetic dating")),
       div(class = "target-box",
-        numericInput("ancestor_age_my", "Ancestor age (million years)", 10,
+        numericInput("ancestor_age_my", tags$span("Ancestor age (My)",
+          title = "How old is the common ancestor of these repeats? From phylogenetic dating."), 10,
                      min = 0.1, step = 1),
-        numericInput("gen_time_yr", "Generation time (years)", 10,
+        numericInput("gen_time_yr", tags$span("Generation time (yr)",
+          title = "Years per generation for this organism (age to reproductive maturity)."), 10,
                      min = 1, step = 1),
-        numericInput("compression", "Time compression factor", 1000,
+        numericInput("compression", tags$span("Time compression",
+          title = "Speed up the simulation by this factor. Rates are scaled up, generations scaled down, preserving mu*t product."), 1000,
                      min = 1, step = 100),
-        numericInput("mu_per_base_real", "Real mutation rate (per base/gen)",
+        numericInput("mu_per_base_real", tags$span("Real mutation rate",
+          title = "Per-base per-generation substitution rate. For plants typically 10^-8 to 10^-9. Derived from: target_load / (monomer_length * real_generations)."),
                      5.6e-8, min = 1e-10, max = 1e-6, step = 1e-9),
-        numericInput("init_l", "Monomer length (bp)", 178, min = 10, step = 10),
+        numericInput("init_l", tags$span("Monomer length (bp)",
+          title = "Length of one repeat monomer in base pairs. From your sequence data."), 178, min = 10, step = 10),
         htmlOutput("clock_info")
       ),
 
-      h4("Algorithm"),
-      numericInput("n_particles", "Particles per generation", 500,
+      h4(tags$span("Algorithm", title = "SMC-ABC algorithm settings")),
+      numericInput("n_particles", tags$span("Particles per generation",
+        title = "Number of parameter combinations tested each generation. More = better exploration but slower. 200-500 recommended."), 500,
                    min = 10, step = 50),
-      numericInput("max_generations", "Max generations", 10, min = 1),
-      sliderInput("retention_frac", "Retention fraction", 0.3,
+      numericInput("max_generations", tags$span("Max ABC generations",
+        title = "Maximum number of ABC generations before stopping. Convergence detection may stop earlier."), 10, min = 1),
+      sliderInput("retention_frac", tags$span("Retention fraction",
+        title = "Fraction of valid particles kept each generation. Lower = stricter selection, faster convergence but risk of particle degeneracy."), 0.3,
                   min = 0.1, max = 0.9, step = 0.05),
-      sliderInput("perturbation_sd", "Initial perturbation (Gen 0 only)", 0.3,
+      sliderInput("perturbation_sd", tags$span("Initial perturbation",
+        title = "Perturbation scale for Gen 0 (fraction of prior range). After Gen 0, perturbation adapts to the empirical spread of survivors."), 0.3,
                   min = 0.05, max = 0.5, step = 0.05),
 
-      h4("Simulation"),
-      numericInput("sim_timeout", "Per-particle timeout (sec)", 30,
+      h4(tags$span("Simulation", title = "Per-particle simulation settings")),
+      numericInput("sim_timeout", tags$span("Per-particle timeout (sec)",
+        title = "Maximum wall-clock time for a single simulation. Particles exceeding this are killed."), 30,
                    min = 1, max = 300, step = 5)
     ),
 
@@ -482,7 +498,13 @@ server <- function(input, output, session) {
         # --- Need to start a new generation? ---
         if (idx >= n_particles) {
           particles <- state$particles
-          n_valid <- nrow(particles)  # all particles are valid (failures retried)
+          n_valid <- if (!is.null(particles)) nrow(particles) else 0L
+
+          # Need at least 3 valid particles to continue
+          if (n_valid < 3) {
+            state$running <- FALSE
+            return()
+          }
 
           # After Gen 0: compute stat scales from pilot batch and recompute
           # all distances so they're properly normalized going forward.
@@ -584,21 +606,16 @@ server <- function(input, output, session) {
         timed_out <- is.null(res$stats) && !is.null(res$elapsed) &&
                      res$elapsed >= (timeout - 0.5)
 
+        # Always advance — no retrying. Failures are informative.
+        state$particle_idx <- idx + 1L
+
         if (is.null(res$stats)) {
-          # Failed particle — track it but DON'T increment particle_idx.
-          # We'll retry with a new draw to fill this slot.
           if (timed_out) {
             state$n_timeout <- state$n_timeout + 1L
           } else {
             state$n_failed <- state$n_failed + 1L
           }
-          # Safety valve: if too many consecutive failures, give up on this gen
-          if (state$n_attempts > n_particles * 5) {
-            state$running <- FALSE
-            return()
-          }
         } else {
-          # Valid particle — store it and advance to next slot
           d <- compute_distance(res$stats, target, state$stat_scales)
           row <- cbind(proposed, res$stats, data.table(distance = d,
             elapsed = res$elapsed, status = "ok"))
@@ -611,7 +628,6 @@ server <- function(input, output, session) {
           } else {
             state$particles <- rbind(state$particles, row, fill = TRUE)
           }
-          state$particle_idx <- idx + 1L
         }
       }  # end batch while loop
     })
