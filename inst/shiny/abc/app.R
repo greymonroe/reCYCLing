@@ -45,7 +45,7 @@ help_label <- function(text, tooltip) {
 # All 9 possible ABC parameters with defaults and prior ranges.
 # Which ones are actually fitted is controlled by checkboxes in the UI.
 ALL_PARAMS <- list(
-  list(name = "p_local_dup",  lo = -4.2, hi = -3.0, default = -3.4,
+  list(name = "p_local_dup",  lo = -5.5, hi = -3.0, default = -4.5,
        transform = function(x) 10^x, label = "Local dup rate"),
   list(name = "p_distal_dup", lo = -2,   hi = -0.3, default = -1.3,
        transform = function(x) 10^x, label = "Distal dup rate"),
@@ -57,7 +57,7 @@ ALL_PARAMS <- list(
        transform = function(x) x,    label = "Local chunk scale"),
   list(name = "distal_shape", lo = 0.5,  hi = 5,    default = 2,
        transform = function(x) x,    label = "Distal chunk shape"),
-  list(name = "distal_scale", lo = 10,   hi = 5000, default = 2000,
+  list(name = "distal_scale", lo = 10,   hi = 5000, default = 500,
        transform = function(x) x,    label = "Distal chunk scale"),
   list(name = "del_shape",    lo = 0.5,  hi = 5,    default = 2,
        transform = function(x) x,    label = "Del chunk shape"),
@@ -142,7 +142,7 @@ run_and_summarize_one <- function(row, sim_gens, init_l, init_k0,
   # Run for fixed number of generations (molecular clock).
   # Cap array size to avoid explosive growth eating all memory/time.
   target_size <- if (!is.null(target)) target$target_array_size else 20000
-  hard_cap <- as.integer(target_size * 1.5)
+  hard_cap <- as.integer(target_size * 5)
 
   sim <- tryCatch(
     suppressWarnings(run_sim_ps(
@@ -364,8 +364,8 @@ ui <- fluidPage(
         fluidRow(
           column(2, checkboxInput("fit_p_local_dup", NULL, TRUE)),
           column(10, numericInput("fixed_p_local_dup",
-            help_label("Local dup rate (log10)", "Per-unit per-generation probability of tandem duplication (log10 scale). At 20K units, a value of -3.4 means ~8 dup events per generation. The ABC searches this range to match your observed near-distance distribution."),
-            -3.4, step = 0.1))
+            help_label("Local dup rate (log10)", "Per-unit per-generation probability of tandem duplication (log10 scale). At 20K units, a value of -4.5 means ~0.6 dup events per generation. The ABC searches this range to match your observed near-distance distribution."),
+            -4.5, step = 0.1))
         ),
         fluidRow(
           column(2, checkboxInput("fit_p_distal_dup", NULL, TRUE)),
@@ -400,8 +400,8 @@ ui <- fluidPage(
         fluidRow(
           column(2, checkboxInput("fit_distal_scale", NULL, FALSE)),
           column(10, numericInput("fixed_distal_scale",
-            help_label("Distal chunk scale", "Gamma scale for distal duplication. With shape=2, scale=2000: mean chunk = 4000 units. This determines the scale of the far-distance peak — larger values spread identical pairs farther apart."),
-            2000, min = 10, step = 100))
+            help_label("Distal chunk scale", "Gamma scale for distal duplication. With shape=2, scale=500: mean chunk = 1000 units. This determines the scale of the far-distance peak — larger values spread identical pairs farther apart."),
+            500, min = 10, step = 100))
         ),
         fluidRow(
           column(2, checkboxInput("fit_del_shape", NULL, FALSE)),
@@ -745,19 +745,21 @@ server <- function(input, output, session) {
       timing_info <- if (!is.na(last_t))
         paste0(' | Last: ', round(last_t, 1), 's') else ''
 
-      retry_info <- ''
+      n_valid <- if (!is.null(state$particles)) nrow(state$particles) else 0L
+      fail_info <- ''
       if (state$n_failed > 0 || state$n_timeout > 0) {
         parts <- c()
         if (state$n_failed > 0)  parts <- c(parts, paste0(state$n_failed, ' failed'))
         if (state$n_timeout > 0) parts <- c(parts, paste0(state$n_timeout, ' timed out'))
-        retry_info <- paste0(' | Retried: ', paste(parts, collapse = ', '))
+        fail_info <- paste0('<br>', paste(parts, collapse = ', '))
       }
 
       HTML(paste0(
         '<div class="status-text" style="color: green;">',
-        'Gen ', gen, ' | Filled ', idx, '/', n,
-        ' (', pct, '%)', timing_info, retry_info,
-        '<br>Attempts: ', state$n_attempts, ' | Elapsed: ', gen_elapsed, 's',
+        'Gen ', gen, ' | ', idx, '/', n, ' attempted',
+        ' | ', n_valid, ' valid', timing_info,
+        fail_info,
+        '<br>Elapsed: ', gen_elapsed, 's',
         '</div>'))
     } else if (nrow(state$convergence) > 0) {
       best <- min(state$convergence$best)
