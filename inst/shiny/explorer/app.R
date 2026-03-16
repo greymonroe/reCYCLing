@@ -2,6 +2,7 @@ library(shiny)
 library(reCYCLing)
 library(ggplot2)
 library(data.table)
+library(cowplot)
 
 # ============================================================================
 # UI
@@ -15,6 +16,8 @@ ui <- fluidPage(
     .btn-primary { width: 100%; margin-top: 10px; margin-bottom: 10px;
                    font-size: 16px; padding: 10px; }
     .sim-time { color: #888; font-style: italic; margin-bottom: 10px; }
+    .mode-box { background: #e8f0fe; padding: 8px; border-radius: 5px;
+                margin-bottom: 10px; }
   "))),
 
   titlePanel("reCYCLing Simulation Explorer"),
@@ -26,30 +29,38 @@ ui <- fluidPage(
       actionButton("run", "Run Simulation", class = "btn-primary"),
       textOutput("sim_time"),
 
+      h4("Stopping rule"),
+      div(class = "mode-box",
+        radioButtons("stop_mode", NULL,
+          choices = c("Grow to size" = "size", "Fixed generations (equilibrium)" = "gens"),
+          selected = "gens"),
+        conditionalPanel("input.stop_mode == 'size'",
+          numericInput("max_units", "Max units", 10000, min = 100, step = 1000)
+        ),
+        conditionalPanel("input.stop_mode == 'gens'",
+          numericInput("max_t_fixed", "Generations", 1000, min = 100, step = 100)
+        )
+      ),
+
       h4("Array"),
-      numericInput("max_units", "Max units", 10000, min = 100, step = 1000),
       numericInput("init_l", "Monomer length (bp)", 178, min = 10, max = 500),
       numericInput("init_k0", "Initial copies", 10, min = 1, max = 100),
 
       h4("Duplication rates"),
-      sliderInput("p_local_dup", "Local dup prob (per unit)",
-                  min = -5, max = -1, value = log10(0.0004), step = 0.1,
-                  post = " (log10)"),
-      sliderInput("p_distal_dup", "Distal dup prob (per unit)",
-                  min = -7, max = -2, value = log10(1e-5), step = 0.1,
-                  post = " (log10)"),
+      sliderInput("p_local_dup", "Local dup (per unit, log10)",
+                  min = -6, max = -2, value = -4, step = 0.1),
+      sliderInput("p_distal_dup", "Distal dup (per array, log10)",
+                  min = -3, max = 0, value = log10(0.05), step = 0.1),
       sliderInput("p_invert_distal", "P(invert distal chunk)",
                   min = 0, max = 1, value = 0.5, step = 0.05),
 
       h4("Deletion"),
-      sliderInput("p_del_chunk", "Deletion prob (per unit)",
-                  min = -7, max = -2, value = log10(1e-5), step = 0.1,
-                  post = " (log10)"),
+      sliderInput("p_del_chunk", "Deletion (per unit, log10)",
+                  min = -7, max = -2, value = log10(7e-5), step = 0.1),
 
       h4("Mutation"),
-      sliderInput("mu_total", "Mutation rate (per base)",
-                  min = -6, max = -2, value = log10(5e-5), step = 0.1,
-                  post = " (log10)"),
+      sliderInput("mu_total", "Mutation rate (per base, log10)",
+                  min = -7, max = -3, value = log10(5.6e-5), step = 0.1),
 
       h4("Chunk-size distributions"),
       helpText("Gamma(shape, scale) for duplication/deletion chunk sizes"),
@@ -86,6 +97,8 @@ ui <- fluidPage(
         id = "tabs",
         tabPanel("Summary",
                  plotOutput("summary_plot", height = "900px")),
+        tabPanel("Trajectories & Load",
+                 plotOutput("traj_load_plot", height = "700px")),
         tabPanel("Fingerprint",
                  plotOutput("fingerprint_plot", height = "700px")),
         tabPanel("Pair Distances",
@@ -96,8 +109,6 @@ ui <- fluidPage(
                  plotOutput("mutload_plot", height = "500px")),
         tabPanel("Consensus Support",
                  plotOutput("consensus_plot", height = "500px")),
-        tabPanel("Trajectories",
-                 plotOutput("traj_plot", height = "500px")),
         tabPanel("Stats",
                  verbatimTextOutput("stats_text"))
       )
@@ -115,10 +126,21 @@ server <- function(input, output, session) {
   run_simulation <- function() {
     t0 <- proc.time()
 
+    # Determine stopping rule
+    if (input$stop_mode == "size") {
+      max_u <- input$max_units
+      max_t <- 1000000L  # effectively unlimited
+    } else {
+      max_u <- 200000L   # very high ceiling — size is emergent
+      max_t <- input$max_t_fixed
+    }
+
     sim <- withProgress(message = "Running simulation...", value = 0, {
       incProgress(0.1, detail = "Evolving array")
       result <- run_sim_ps(
-        max_units       = input$max_units,
+        max_units       = max_u,
+        max_t           = max_t,
+        hard_cap        = 200000L,
         init_l          = input$init_l,
         init_k0         = input$init_k0,
         p_local_dup     = 10^input$p_local_dup,
@@ -184,6 +206,60 @@ server <- function(input, output, session) {
     plot_ps_summary(sim, title = "Simulation Summary")
   }, res = 120)
 
+  output$traj_load_plot <- renderPlot({
+    sim <- sim_result()
+    req(sim)
+    mono <- sim$monomers
+
+    # Size trajectory
+    traj <- data.table(gen = seq_along(sim$L_vec), size = sim$L_vec)
+    p1 <- ggplot(traj, aes(x = gen, y = size)) +
+      geom_line(colour = "steelblue", linewidth = 0.5) +
+      theme_classic(base_size = 12) +
+      labs(x = "Generation", y = "Array size", title = "Array size trajectory")
+
+    # Mutation load distribution
+    ct <- tryCatch(counts_long_nogap(mono$bponly), error = function(e) NULL)
+    if (!is.null(ct)) {
+      cons <- ct[symbol == consensus][order(pos)]
+      load <- mu_load_from_consensus(mono$bponly, cons)
+      p2 <- ggplot(data.frame(load = load), aes(x = load)) +
+        geom_histogram(bins = 40, fill = "firebrick", alpha = 0.7, colour = "white") +
+        geom_vline(xintercept = mean(load), linetype = "dashed") +
+        theme_classic(base_size = 12) +
+        labs(x = "Mismatches to consensus", y = "Count",
+             title = paste0("Mutation load (mean = ", round(mean(load), 1), ")"))
+    } else {
+      p2 <- ggplot() + theme_void() + annotate("text", x=.5, y=.5, label="N/A")
+    }
+
+    # Copy number distribution
+    cn <- mono[, .N, by = bponly]
+    p3 <- ggplot(cn, aes(x = N)) +
+      geom_histogram(bins = 50, fill = "darkorange", alpha = 0.7, colour = "white") +
+      scale_x_log10() +
+      theme_classic(base_size = 12) +
+      labs(x = "Copies per unique sequence", y = "Count",
+           title = paste0("Copy numbers (", nrow(cn), " unique / ",
+                          nrow(mono), " total)"))
+
+    # Info panel
+    n_gens <- length(sim$L_vec)
+    info_text <- paste0(
+      "Generations: ", n_gens, "\n",
+      "Final size: ", nrow(mono), " monomers\n",
+      "Unique sequences: ", uniqueN(mono$bponly), "\n",
+      if (!is.null(ct)) paste0("Mean load: ", round(mean(load), 1), "\n") else "",
+      "Mean copy number: ", round(mean(cn$N), 1)
+    )
+    p4 <- ggplot() + theme_void() +
+      annotate("text", x = 0.5, y = 0.5, label = info_text,
+               size = 4.5, hjust = 0.5, family = "mono") +
+      ggtitle("Summary statistics")
+
+    plot_grid(p1, p2, p3, p4, ncol = 2)
+  }, res = 120)
+
   output$fingerprint_plot <- renderPlot({
     sim <- sim_result()
     req(sim)
@@ -215,17 +291,6 @@ server <- function(input, output, session) {
     sim <- sim_result()
     req(sim)
     plot_consensus_support(sim)
-  }, res = 120)
-
-  output$traj_plot <- renderPlot({
-    sim <- sim_result()
-    req(sim)
-    traj <- data.frame(gen = seq_along(sim$L_vec), size = sim$L_vec)
-    ggplot(traj, aes(x = gen, y = size)) +
-      geom_line(colour = "steelblue", linewidth = 0.5) +
-      theme_classic(base_size = 14) +
-      xlab("Generation") +
-      ylab("Array size (monomers)")
   }, res = 120)
 
   output$stats_text <- renderPrint({
