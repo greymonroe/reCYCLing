@@ -1,0 +1,225 @@
+---
+title: "Equilibrium dynamics in tandem repeat arrays"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Equilibrium dynamics in tandem repeat arrays}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  fig.width  = 8,
+  fig.height = 4,
+  out.width  = "100%",
+  dpi = 150
+)
+set.seed(42)
+library(data.table)
+library(ggplot2)
+library(reCYCLing)
+```
+
+## The growth problem
+
+In the standard reCYCLing simulation, a tandem repeat array grows from a small
+initial copy number until it reaches a target size (`max_units`). But in real
+genomes, repeat arrays don't grow without bound — they reach a characteristic
+size that reflects a balance between expansion and contraction forces.
+
+Can we reproduce this equilibrium in simulation?
+
+## Two kinds of duplication, one kind of deletion
+
+The simulator has three forces that change array size:
+
+| Force | Rate type | Effect on size |
+|-------|-----------|----------------|
+| **Local duplication** | Per-unit per-gen | Grows faster as array gets bigger |
+| **Distal duplication** | Per-array per-gen | Constant injection regardless of size |
+| **Chunk deletion** | Per-unit per-gen | Shrinks faster as array gets bigger |
+
+Local duplication and deletion both scale with array size. If their rates and
+chunk sizes are similar, they roughly cancel — but the array does a random walk
+that eventually hits zero (extinction).
+
+**Distal duplication is the key to equilibrium.** Because it's a per-array event
+(one crossover per generation, independent of array size), it acts as a constant
+source of new material. As the array grows, per-unit deletion increases until it
+balances the distal input. The result: a stable equilibrium size.
+
+## Demonstrating equilibrium
+
+Let's run simulations with different deletion rates while keeping distal
+duplication fixed, and watch the array size over time.
+
+```{r equilibrium_sims, cache=TRUE}
+params <- list(
+  list(name = "Low deletion (5e-6)",    pdel = 5e-6),
+  list(name = "Medium deletion (5e-5)", pdel = 5e-5),
+  list(name = "High deletion (7e-5)",   pdel = 7e-5),
+  list(name = "Very high deletion (2e-4)", pdel = 2e-4)
+)
+
+trajectories <- rbindlist(lapply(params, function(p) {
+  sim <- suppressWarnings(run_sim_ps(
+    max_units = 200000, max_t = 5000, hard_cap = 200000,
+    init_l = 178, init_k0 = 10,
+    p_local_dup = 1e-5,      # low local dup
+    p_distal_dup = 0.05,     # 5% chance of crossover per generation
+    p_del_chunk = p$pdel,
+    mu_total = 5e-5,
+    verbose = FALSE, compute_pairs = FALSE
+  ))
+  data.table(
+    gen = seq_along(sim$L_vec),
+    size = sim$L_vec,
+    scenario = p$name
+  )
+}))
+```
+
+```{r plot_trajectories, fig.height=5}
+ggplot(trajectories, aes(x = gen, y = size, colour = scenario)) +
+  geom_line(linewidth = 0.5, alpha = 0.8) +
+  scale_y_log10(labels = scales::comma) +
+  theme_classic(base_size = 12) +
+  labs(x = "Generation", y = "Array size (monomers)",
+       colour = "Deletion rate",
+       title = "Array size trajectories under different deletion rates",
+       subtitle = "Distal dup = 0.05/gen, local dup = 1e-5/unit/gen") +
+  theme(legend.position = "bottom")
+```
+
+With low deletion, the array grows without bound. With higher deletion rates,
+the array reaches an equilibrium size where distal duplication input balances
+deletion loss. The equilibrium size decreases as deletion rate increases.
+
+## Equilibrium size depends on the balance of forces
+
+Let's measure the equilibrium size across a range of deletion rates.
+
+```{r eq_sweep, cache=TRUE}
+del_rates <- 10^seq(-5.5, -3, by = 0.25)
+
+eq_data <- rbindlist(lapply(del_rates, function(pdel) {
+  sim <- suppressWarnings(run_sim_ps(
+    max_units = 200000, max_t = 5000, hard_cap = 200000,
+    init_l = 178, init_k0 = 10,
+    p_local_dup = 1e-5, p_distal_dup = 0.05,
+    p_del_chunk = pdel, mu_total = 5e-5,
+    verbose = FALSE, compute_pairs = FALSE
+  ))
+  lv <- sim$L_vec
+  n <- length(lv)
+  # Use last 20% as equilibrium estimate
+  tail_start <- max(1, as.integer(n * 0.8))
+  tail_vals <- lv[tail_start:n]
+  data.table(
+    p_del = pdel,
+    eq_size = mean(tail_vals),
+    eq_sd = sd(tail_vals),
+    n_gens = n,
+    final = lv[n]
+  )
+}))
+```
+
+```{r plot_eq_size}
+ggplot(eq_data, aes(x = p_del, y = eq_size)) +
+  geom_pointrange(aes(ymin = eq_size - eq_sd, ymax = eq_size + eq_sd)) +
+  scale_x_log10() +
+  scale_y_log10(labels = scales::comma) +
+  theme_classic(base_size = 12) +
+  labs(x = "Deletion rate (per unit per gen)",
+       y = "Equilibrium array size",
+       title = "Equilibrium size vs deletion rate",
+       subtitle = "Error bars = SD of size in last 20% of trajectory")
+```
+
+The relationship is roughly inverse: doubling the deletion rate halves the
+equilibrium size. This makes intuitive sense — the equilibrium occurs where
+total deletion rate (per-unit rate × array size) equals the distal duplication
+input.
+
+## Mutation load at equilibrium
+
+At equilibrium, monomers have been accumulating mutations for many generations.
+The mutation load reflects the age of the array — how long the evolutionary
+process has been running.
+
+```{r eq_load, cache=TRUE}
+# Run one long equilibrium simulation and track load over time
+sim_eq <- suppressWarnings(run_sim_ps(
+  max_units = 200000, max_t = 8000, hard_cap = 200000,
+  init_l = 178, init_k0 = 10,
+  p_local_dup = 1e-5, p_distal_dup = 0.05,
+  p_del_chunk = 7e-5, mu_total = 5e-5,
+  verbose = FALSE, compute_pairs = FALSE
+))
+
+mono <- sim_eq$monomers
+ct <- counts_long_nogap(mono$bponly)
+cons <- ct[symbol == consensus][order(pos)]
+load <- mu_load_from_consensus(mono$bponly, cons)
+
+cat("Final array size:", nrow(mono), "\n")
+cat("Generations:", length(sim_eq$L_vec), "\n")
+cat("Mean mutation load:", round(mean(load), 1), "\n")
+cat("Median mutation load:", round(median(load), 1), "\n")
+```
+
+```{r plot_load_and_trajectory, fig.height=6}
+library(cowplot)
+
+p_traj <- ggplot(data.frame(gen = seq_along(sim_eq$L_vec), size = sim_eq$L_vec),
+                 aes(x = gen, y = size)) +
+  geom_line(colour = "steelblue") +
+  theme_classic(base_size = 11) +
+  labs(x = "Generation", y = "Array size", title = "Size trajectory")
+
+p_load <- ggplot(data.frame(load = load), aes(x = load)) +
+  geom_histogram(bins = 40, fill = "firebrick", alpha = 0.7, colour = "white") +
+  theme_classic(base_size = 11) +
+  labs(x = "Mismatches to consensus", y = "Count",
+       title = "Mutation load distribution at equilibrium")
+
+plot_grid(p_traj, p_load, ncol = 1)
+```
+
+## The fingerprint at equilibrium
+
+What does the identical-pair structure look like when the array has been
+evolving at equilibrium?
+
+```{r fingerprint_eq, fig.height=8, cache=TRUE}
+# Need to compute pairs for plotting
+sim_eq_with_pairs <- sim_eq
+sim_eq_with_pairs$ps <- pairs_identical(mono)
+
+plot_ps_summary(sim_eq_with_pairs, title = "Equilibrium array (8000 gens)")
+```
+
+## Implications for ABC inference
+
+The equilibrium model has an important implication for parameter inference:
+**array size itself becomes an informative summary statistic.** Instead of
+growing arrays to a preset target size, we can let the simulation run for a
+fixed number of generations and see what size it reaches. The observed array
+size then constrains the ratio of duplication to deletion rates.
+
+This is more biologically realistic than the "grow to N" stopping rule,
+because real repeat arrays in genomes reflect an evolutionary equilibrium,
+not an arbitrary size cap.
+
+Key parameters that determine the equilibrium:
+
+- **Distal duplication rate** (per-array): Controls the constant input
+- **Deletion rate** (per-unit): Controls size-dependent loss
+- **Deletion chunk size**: Larger chunks = more material removed per event
+- **Local duplication rate**: Adds to growth but doesn't create equilibrium alone
+
+The mutation load at equilibrium is determined by `mu_total × n_generations`,
+providing an independent constraint on evolutionary time.

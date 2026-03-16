@@ -139,9 +139,9 @@ dir.create(CONFIG$outdir, showWarnings = FALSE, recursive = TRUE)
 # to these bounds — particles can explore beyond them freely.
 
 PARAMS <- list(
-  list(name = "p_local_dup",   lo = -4,   hi = -2,   transform = function(x) 10^x),
+  list(name = "p_local_dup",   lo = -6,   hi = -3.5, transform = function(x) 10^x),
   list(name = "p_distal_dup",  lo = -3,   hi = -0.3, transform = function(x) 10^x),  # per-array
-  list(name = "p_del_chunk",   lo = -6,   hi = -3,   transform = function(x) 10^x),
+  list(name = "p_del_chunk",   lo = -7,   hi = -4,   transform = function(x) 10^x),
   list(name = "mu_total",      lo = -5,   hi = -2,   transform = function(x) 10^x),
   list(name = "local_shape",   lo = 0.5,  hi = 5,    transform = function(x) x),
   list(name = "local_scale",   lo = 1,    hi = 50,   transform = function(x) x),
@@ -312,16 +312,17 @@ run_and_summarize <- function(row, config) {
 
 compute_distance <- function(sim_stats, target, stat_scales = NULL) {
   diffs <- c(
-    log_mode1 = sim_stats$log_mode1 - target$log_mode1,
-    log_mode2 = sim_stats$log_mode2 - target$log_mode2,
-    weight1   = sim_stats$weight1   - target$weight1,
+    med_near  = sim_stats$med_near  - target$med_near,
+    med_far   = sim_stats$med_far   - target$med_far,
+    near_frac = sim_stats$near_frac - target$near_frac,
     mean_load = (sim_stats$mean_load - target$mean_load) / max(target$mean_load, 0.1)
   )
-  # Normalize by SD of each stat (computed from Gen 0 pilot batch)
   if (!is.null(stat_scales)) {
     diffs <- diffs / stat_scales
   }
-  sqrt(sum(diffs^2))
+  euclidean <- sqrt(mean(diffs^2))
+  worst     <- max(abs(diffs))
+  0.5 * euclidean + 0.5 * worst
 }
 
 compute_stat_scales <- function(particles, target) {
@@ -354,12 +355,13 @@ compute_param_sds <- function(kept, fallback_scale = 0.3) {
   sds <- list()
   for (j in seq_along(PARAMS)) {
     pname <- PARAMS[[j]]$name
+    prior_range <- PARAMS[[j]]$hi - PARAMS[[j]]$lo
     emp_sd <- if (!is.null(kept) && nrow(kept) >= 3)
       sd(kept[[pname]], na.rm = TRUE) else NA_real_
     if (is.na(emp_sd) || emp_sd < 1e-10) {
-      sds[[pname]] <- fallback_scale * (PARAMS[[j]]$hi - PARAMS[[j]]$lo)
+      sds[[pname]] <- fallback_scale * prior_range
     } else {
-      sds[[pname]] <- 2 * emp_sd
+      sds[[pname]] <- min(2 * emp_sd, prior_range * 0.15)
     }
   }
   sds

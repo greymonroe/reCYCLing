@@ -38,9 +38,13 @@ library(scales)
 # ============================================================================
 
 PARAMS <- list(
-  list(name = "p_local_dup",  lo = -4,  hi = -2,   transform = function(x) 10^x),
-  list(name = "p_distal_dup", lo = -3,  hi = -0.3, transform = function(x) 10^x),  # per-array (not per-unit)
-  list(name = "p_del_chunk",  lo = -6,  hi = -3,   transform = function(x) 10^x),
+  # p_local_dup: per-unit per-gen. Vignette used 4e-4.
+  # At 10-20K units, want ~1-10 events/gen → 10^-5 to 10^-3
+  list(name = "p_local_dup",  lo = -5,  hi = -3,   transform = function(x) 10^x),
+  # p_distal_dup: per-array per-gen. Vignette had 1e-5 per-unit at 10K = 0.1/gen
+  list(name = "p_distal_dup", lo = -2,  hi = -0.3, transform = function(x) 10^x),
+  # p_del_chunk: per-unit per-gen. Vignette had 1e-5.
+  list(name = "p_del_chunk",  lo = -6,  hi = -4,   transform = function(x) 10^x),
   list(name = "local_shape",  lo = 0.5, hi = 5,    transform = function(x) x),
   list(name = "local_scale",  lo = 1,   hi = 50,   transform = function(x) x),
   list(name = "distal_shape", lo = 0.5, hi = 5,    transform = function(x) x),
@@ -174,7 +178,23 @@ run_and_summarize_one <- function(row, max_units, max_t, init_l, init_k0,
   if (is.na(med_near) || is.na(med_far))
     return(list(stats = NULL, sim = sim, elapsed = elapsed))
 
-  # Mutation load
+  # Mutation load — compute on a quick subsample first to reject wildly off particles
+  sample_n <- min(200, nrow(mono))
+  sample_seqs <- mono$bponly[sample.int(nrow(mono), sample_n)]
+  ct_quick <- tryCatch(counts_long_nogap(sample_seqs), error = function(e) NULL)
+  if (is.null(ct_quick)) return(list(stats = NULL, sim = sim, elapsed = elapsed))
+  cons_quick <- ct_quick[symbol == consensus][order(pos)]
+  load_quick <- mu_load_from_consensus(sample_seqs, cons_quick)
+  mean_load_est <- mean(load_quick)
+
+  # Biological gate: if mutation load is wildly off target, reject.
+  # This is a hard constraint — we KNOW roughly what load should be.
+  if (!is.null(target) && !is.na(target$mean_load) && target$mean_load > 0) {
+    if (mean_load_est > target$mean_load * 3 || mean_load_est < target$mean_load / 3)
+      return(list(stats = NULL, sim = sim, elapsed = elapsed))
+  }
+
+  # Full mutation load on all monomers
   ct <- tryCatch(counts_long_nogap(mono$bponly), error = function(e) NULL)
   if (is.null(ct)) return(list(stats = NULL, sim = sim, elapsed = elapsed))
   cons <- ct[symbol == consensus][order(pos)]
@@ -196,7 +216,12 @@ compute_distance <- function(sim_stats, target, stat_scales = NULL) {
   if (!is.null(stat_scales)) {
     diffs <- diffs / stat_scales
   }
-  sqrt(sum(diffs^2))
+  # Blended distance: Euclidean (rewards overall improvement) +
+  # max deviation (penalizes ignoring any single stat).
+  # This prevents the ABC from cherry-picking one stat to optimize.
+  euclidean <- sqrt(mean(diffs^2))
+  worst     <- max(abs(diffs))
+  0.5 * euclidean + 0.5 * worst
 }
 
 compute_stat_scales <- function(particles, target) {
@@ -232,13 +257,14 @@ compute_param_sds <- function(kept, fallback_scale = 0.3) {
   sds <- list()
   for (j in seq_along(PARAMS)) {
     pname <- PARAMS[[j]]$name
+    prior_range <- PARAMS[[j]]$hi - PARAMS[[j]]$lo
     emp_sd <- if (!is.null(kept) && nrow(kept) >= 3)
       sd(kept[[pname]], na.rm = TRUE) else NA_real_
     if (is.na(emp_sd) || emp_sd < 1e-10) {
-      # Fallback: use fraction of prior range (Gen 0 or degenerate posterior)
-      sds[[pname]] <- fallback_scale * (PARAMS[[j]]$hi - PARAMS[[j]]$lo)
+      sds[[pname]] <- fallback_scale * prior_range
     } else {
-      sds[[pname]] <- 2 * emp_sd
+      # Adaptive SD, but capped at the prior range to prevent runaway widening
+      sds[[pname]] <- min(2 * emp_sd, prior_range * 0.15)
     }
   }
   sds
@@ -282,16 +308,16 @@ ui <- fluidPage(
       ),
 
       h4("Algorithm"),
-      numericInput("n_particles", "Particles per generation", 200,
-                   min = 10, step = 10),
+      numericInput("n_particles", "Particles per generation", 500,
+                   min = 10, step = 50),
       numericInput("max_generations", "Max generations", 10, min = 1),
-      sliderInput("retention_frac", "Retention fraction", 0.5,
+      sliderInput("retention_frac", "Retention fraction", 0.3,
                   min = 0.1, max = 0.9, step = 0.05),
       sliderInput("perturbation_sd", "Initial perturbation (Gen 0 only)", 0.3,
                   min = 0.05, max = 0.5, step = 0.05),
 
       h4("Simulation"),
-      numericInput("mu_total", "Mutation rate (per base per gen)", 1e-4,
+      numericInput("mu_total", "Mutation rate (per base per gen)", 5e-5,
                    min = 1e-8, max = 1e-2, step = 1e-5),
       numericInput("max_units", "Max array units", 20000, min = 500,
                    step = 1000),
@@ -380,7 +406,8 @@ server <- function(input, output, session) {
     state$kept <- NULL
     state$convergence <- data.table(gen = integer(), best = numeric(),
                                      median = numeric(), n_valid = integer(),
-                                     n_failed = integer(), n_timeout = integer())
+                                     n_failed = integer(), n_timeout = integer(),
+                                     elapsed_s = numeric())
     state$all_particles <- list()
     state$best_sim <- NULL
     # Initial perturbation SDs: use prior range * perturbation_scale for Gen 0
@@ -507,7 +534,7 @@ server <- function(input, output, session) {
             proposed,
             max_units   = input$max_units,
             max_t       = input$max_t,
-            init_l      = 30L,
+            init_l      = 178L,
             init_k0     = 10L,
             sim_timeout = timeout,
             target      = target,
@@ -790,7 +817,7 @@ server <- function(input, output, session) {
     withProgress(message = "Re-running best particle...", value = 0.3, {
       sim_args <- params_to_args(row, input$mu_total)
       sim <- suppressWarnings(run_sim_ps(
-        max_units = input$max_units, init_l = 30, init_k0 = 10,
+        max_units = input$max_units, init_l = 178, init_k0 = 10,
         p_local_dup = sim_args$p_local_dup,
         p_distal_dup = sim_args$p_distal_dup,
         p_del_chunk = sim_args$p_del_chunk,
