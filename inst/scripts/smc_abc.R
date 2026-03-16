@@ -140,15 +140,15 @@ dir.create(CONFIG$outdir, showWarnings = FALSE, recursive = TRUE)
 # to these bounds — particles can explore beyond them freely.
 
 PARAMS <- list(
-  list(name = "p_local_dup",   lo = -5,   hi = -3,   transform = function(x) 10^x),
-  list(name = "p_distal_dup",  lo = -2,   hi = -0.3, transform = function(x) 10^x),  # per-array
-  list(name = "p_del_chunk",   lo = -6,   hi = -4,   transform = function(x) 10^x),
-  list(name = "local_shape",   lo = 0.5,  hi = 5,    transform = function(x) x),
-  list(name = "local_scale",   lo = 1,    hi = 50,   transform = function(x) x),
-  list(name = "distal_shape",  lo = 0.5,  hi = 5,    transform = function(x) x),
-  list(name = "distal_scale",  lo = 10,   hi = 2000, transform = function(x) x),
-  list(name = "del_shape",     lo = 0.5,  hi = 5,    transform = function(x) x),
-  list(name = "del_scale",     lo = 1,    hi = 50,   transform = function(x) x)
+  list(name = "p_local_dup",   lo = -4.2, hi = -3.0, transform = function(x) 10^x),
+  list(name = "p_distal_dup",  lo = -2,   hi = -0.3, transform = function(x) 10^x),
+  list(name = "p_del_chunk",   lo = -6,   hi = -4,   transform = function(x) 10^x)
+)
+
+FIXED_DISTS <- list(
+  local_dist  = list(type = "gamma", shape = 2, scale = 15),
+  distal_dist = list(type = "gamma", shape = 2, scale = 2000),
+  del_dist    = list(type = "gamma", shape = 2, scale = 15)
 )
 
 param_names <- sapply(PARAMS, `[[`, "name")
@@ -176,12 +176,9 @@ params_to_args <- function(row, mu_total) {
     p_distal_dup = PARAMS[[2]]$transform(row$p_distal_dup),
     p_del_chunk  = PARAMS[[3]]$transform(row$p_del_chunk),
     mu_total     = mu_total,
-    local_dist   = list(type = "gamma", shape = row$local_shape,
-                        scale = row$local_scale),
-    distal_dist  = list(type = "gamma", shape = row$distal_shape,
-                        scale = row$distal_scale),
-    del_dist     = list(type = "gamma", shape = row$del_shape,
-                        scale = row$del_scale)
+    local_dist   = FIXED_DISTS$local_dist,
+    distal_dist  = FIXED_DISTS$distal_dist,
+    del_dist     = FIXED_DISTS$del_dist
   )
 }
 
@@ -234,7 +231,7 @@ run_and_summarize <- function(row, config) {
   sim_gens <- round(config$ancestor_age_my * 1e6 / config$gen_time_yr / config$compression)
   sim_args <- params_to_args(row, mu_compressed)
   target_size <- config$target$target_array_size
-  hard_cap <- as.integer(target_size * 3)
+  hard_cap <- as.integer(target_size * 1.5)
 
   sim <- tryCatch(
     {
@@ -604,9 +601,7 @@ run_smc_abc <- function(config) {
   top_display[, near := 10^med_near]
   top_display[, far := 10^med_far]
   print(top_display[, .(p_local_dup, p_distal_dup, p_del_chunk,
-                         local_shape, local_scale, distal_shape, distal_scale,
-                         del_shape, del_scale,
-                         near, far, near_frac, mean_load, distance)],
+                         near, far, near_frac, mean_load, n_units, distance)],
         digits = 3)
 
   cat("\nPosterior summary (top 50%):\n")

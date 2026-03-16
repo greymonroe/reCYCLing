@@ -37,22 +37,33 @@ library(scales)
 # ABC helper functions
 # ============================================================================
 
-PARAMS <- list(
-  # p_local_dup: per-unit per-gen. Vignette used 4e-4.
-  # At 10-20K units, want ~1-10 events/gen → 10^-5 to 10^-3
-  list(name = "p_local_dup",  lo = -5,  hi = -3,   transform = function(x) 10^x),
-  # p_distal_dup: per-array per-gen. Vignette had 1e-5 per-unit at 10K = 0.1/gen
-  list(name = "p_distal_dup", lo = -2,  hi = -0.3, transform = function(x) 10^x),
-  # p_del_chunk: per-unit per-gen. Vignette had 1e-5.
-  list(name = "p_del_chunk",  lo = -6,  hi = -4,   transform = function(x) 10^x),
-  list(name = "local_shape",  lo = 0.5, hi = 5,    transform = function(x) x),
-  list(name = "local_scale",  lo = 1,   hi = 50,   transform = function(x) x),
-  list(name = "distal_shape", lo = 0.5, hi = 5,    transform = function(x) x),
-  list(name = "distal_scale", lo = 10,  hi = 2000, transform = function(x) x),
-  list(name = "del_shape",    lo = 0.5, hi = 5,    transform = function(x) x),
-  list(name = "del_scale",    lo = 1,   hi = 50,   transform = function(x) x)
+# All 9 possible ABC parameters with defaults and prior ranges.
+# Which ones are actually fitted is controlled by checkboxes in the UI.
+ALL_PARAMS <- list(
+  list(name = "p_local_dup",  lo = -4.2, hi = -3.0, default = -3.4,
+       transform = function(x) 10^x, label = "Local dup rate"),
+  list(name = "p_distal_dup", lo = -2,   hi = -0.3, default = -1.3,
+       transform = function(x) 10^x, label = "Distal dup rate"),
+  list(name = "p_del_chunk",  lo = -6,   hi = -4,   default = -5,
+       transform = function(x) 10^x, label = "Deletion rate"),
+  list(name = "local_shape",  lo = 0.5,  hi = 5,    default = 2,
+       transform = function(x) x,    label = "Local chunk shape"),
+  list(name = "local_scale",  lo = 1,    hi = 50,   default = 15,
+       transform = function(x) x,    label = "Local chunk scale"),
+  list(name = "distal_shape", lo = 0.5,  hi = 5,    default = 2,
+       transform = function(x) x,    label = "Distal chunk shape"),
+  list(name = "distal_scale", lo = 10,   hi = 5000, default = 2000,
+       transform = function(x) x,    label = "Distal chunk scale"),
+  list(name = "del_shape",    lo = 0.5,  hi = 5,    default = 2,
+       transform = function(x) x,    label = "Del chunk shape"),
+  list(name = "del_scale",    lo = 1,    hi = 50,   default = 15,
+       transform = function(x) x,    label = "Del chunk scale")
 )
-param_names <- sapply(PARAMS, `[[`, "name")
+ALL_PARAM_NAMES <- sapply(ALL_PARAMS, `[[`, "name")
+# These are set dynamically in the server based on which checkboxes are checked.
+# PARAMS, param_names, and sample_prior_one are created at runtime.
+PARAMS <- NULL
+param_names <- NULL
 
 sample_prior_one <- function() {
   row <- as.list(sapply(PARAMS, function(p) runif(1, p$lo, p$hi)))
@@ -60,18 +71,29 @@ sample_prior_one <- function() {
   as.data.table(row)
 }
 
-params_to_args <- function(row, mu_total) {
+# Build simulation args from a particle row + fixed values.
+# `fixed_vals` is a named list of parameter values for non-fitted params.
+params_to_args <- function(row, mu_total, fixed_vals = list()) {
+  # Merge fitted (from row) with fixed (from UI)
+  get_val <- function(pname) {
+    if (pname %in% names(row)) row[[pname]]
+    else if (pname %in% names(fixed_vals)) fixed_vals[[pname]]
+    else {
+      idx <- which(ALL_PARAM_NAMES == pname)
+      ALL_PARAMS[[idx]]$default
+    }
+  }
   list(
-    p_local_dup  = 10^row$p_local_dup,
-    p_distal_dup = 10^row$p_distal_dup,
-    p_del_chunk  = 10^row$p_del_chunk,
+    p_local_dup  = 10^get_val("p_local_dup"),
+    p_distal_dup = 10^get_val("p_distal_dup"),
+    p_del_chunk  = 10^get_val("p_del_chunk"),
     mu_total     = mu_total,
-    local_dist   = list(type = "gamma", shape = row$local_shape,
-                        scale = row$local_scale),
-    distal_dist  = list(type = "gamma", shape = row$distal_shape,
-                        scale = row$distal_scale),
-    del_dist     = list(type = "gamma", shape = row$del_shape,
-                        scale = row$del_scale)
+    local_dist   = list(type = "gamma", shape = get_val("local_shape"),
+                        scale = get_val("local_scale")),
+    distal_dist  = list(type = "gamma", shape = get_val("distal_shape"),
+                        scale = get_val("distal_scale")),
+    del_dist     = list(type = "gamma", shape = get_val("del_shape"),
+                        scale = get_val("del_scale"))
   )
 }
 
@@ -107,14 +129,15 @@ fit_2gauss <- function(x, max_iter = 100, max_n = 10000) {
 }
 
 run_and_summarize_one <- function(row, sim_gens, init_l, init_k0,
-                                  sim_timeout, target = NULL, mu_total = 1e-4) {
-  sim_args <- params_to_args(row, mu_total)
+                                  sim_timeout, target = NULL, mu_total = 1e-4,
+                                  fixed_vals = list()) {
+  sim_args <- params_to_args(row, mu_total, fixed_vals)
   t0 <- proc.time()[3]
 
   # Run for fixed number of generations (molecular clock).
   # Cap array size to avoid explosive growth eating all memory/time.
   target_size <- if (!is.null(target)) target$target_array_size else 20000
-  hard_cap <- as.integer(target_size * 3)
+  hard_cap <- as.integer(target_size * 1.5)
 
   sim <- tryCatch(
     suppressWarnings(run_sim_ps(
@@ -337,6 +360,55 @@ ui <- fluidPage(
         htmlOutput("clock_info")
       ),
 
+      h4(tags$span("Fitted parameters", title = "Check the box to fit a parameter via ABC. Unchecked parameters use the fixed value shown.")),
+      div(class = "target-box",
+        fluidRow(
+          column(2, checkboxInput("fit_p_local_dup", NULL, TRUE)),
+          column(10, numericInput("fixed_p_local_dup", "Local dup rate (log10)", -3.4,
+                                  step = 0.1))
+        ),
+        fluidRow(
+          column(2, checkboxInput("fit_p_distal_dup", NULL, TRUE)),
+          column(10, numericInput("fixed_p_distal_dup", "Distal dup rate (log10)", -1.3,
+                                  step = 0.1))
+        ),
+        fluidRow(
+          column(2, checkboxInput("fit_p_del_chunk", NULL, TRUE)),
+          column(10, numericInput("fixed_p_del_chunk", "Deletion rate (log10)", -5,
+                                  step = 0.1))
+        ),
+        fluidRow(
+          column(2, checkboxInput("fit_local_shape", NULL, FALSE)),
+          column(10, numericInput("fixed_local_shape", "Local chunk shape", 2,
+                                  min = 0.1, step = 0.5))
+        ),
+        fluidRow(
+          column(2, checkboxInput("fit_local_scale", NULL, FALSE)),
+          column(10, numericInput("fixed_local_scale", "Local chunk scale", 15,
+                                  min = 1, step = 5))
+        ),
+        fluidRow(
+          column(2, checkboxInput("fit_distal_shape", NULL, FALSE)),
+          column(10, numericInput("fixed_distal_shape", "Distal chunk shape", 2,
+                                  min = 0.1, step = 0.5))
+        ),
+        fluidRow(
+          column(2, checkboxInput("fit_distal_scale", NULL, FALSE)),
+          column(10, numericInput("fixed_distal_scale", "Distal chunk scale", 2000,
+                                  min = 10, step = 100))
+        ),
+        fluidRow(
+          column(2, checkboxInput("fit_del_shape", NULL, FALSE)),
+          column(10, numericInput("fixed_del_shape", "Del chunk shape", 2,
+                                  min = 0.1, step = 0.5))
+        ),
+        fluidRow(
+          column(2, checkboxInput("fit_del_scale", NULL, FALSE)),
+          column(10, numericInput("fixed_del_scale", "Del chunk scale", 15,
+                                  min = 1, step = 5))
+        )
+      ),
+
       h4(tags$span("Algorithm", title = "Controls for the SMC-ABC (Sequential Monte Carlo Approximate Bayesian Computation) inference. The algorithm works like evolution: a population of candidate parameter sets ('particles') is proposed, scored against your data, and the best are selected and mutated to form the next generation.")),
       numericInput("n_particles", tags$span("Particles per generation",
         title = "Each 'particle' is one complete set of simulation parameters (duplication rates, chunk sizes, etc.) that gets tested by running a full simulation and comparing the result to your target data. More particles = better coverage of parameter space per generation, but each one takes time to simulate. Think of it like population size in a genetic algorithm — larger populations find the optimum faster but cost more per generation. 200-500 is typical."), 500,
@@ -415,7 +487,8 @@ server <- function(input, output, session) {
     n_timeout     = 0L,             # timed-out attempts this generation
     n_attempts    = 0L,             # total attempts this generation
     gen_start_time = NA_real_,      # wall-clock start of current generation
-    stat_scales   = NULL            # SD of each summary stat (from Gen 0 pilot)
+    stat_scales   = NULL,           # SD of each summary stat (from Gen 0 pilot)
+    fixed_vals    = list()          # fixed parameter values (unchecked params)
   )
 
   # Derived clock values
@@ -448,8 +521,28 @@ server <- function(input, output, session) {
          near_far_threshold = input$near_far_threshold)
   })
 
+  # --- Build PARAMS from checkboxes ---
+  build_params <- function() {
+    fitted <- list()
+    fixed  <- list()
+    for (p in ALL_PARAMS) {
+      checkbox_id <- paste0("fit_", p$name)
+      fixed_id    <- paste0("fixed_", p$name)
+      if (isTRUE(input[[checkbox_id]])) {
+        fitted[[length(fitted) + 1]] <- p
+      } else {
+        fixed[[p$name]] <- input[[fixed_id]]
+      }
+    }
+    # Update globals
+    PARAMS <<- fitted
+    param_names <<- sapply(fitted, `[[`, "name")
+    fixed
+  }
+
   # --- Start / Stop ---
   observeEvent(input$start, {
+    state$fixed_vals <- build_params()
     state$running <- TRUE
     state$generation <- 0L
     state$particle_idx <- 0L
@@ -594,7 +687,8 @@ server <- function(input, output, session) {
             init_k0     = 10L,
             sim_timeout = timeout,
             target      = target,
-            mu_total    = get_clock()$mu_compressed
+            mu_total    = get_clock()$mu_compressed,
+            fixed_vals  = state$fixed_vals
           ),
           error = function(e) {
             list(stats = NULL, sim = NULL, elapsed = NA_real_)
@@ -781,16 +875,13 @@ server <- function(input, output, session) {
     }
 
     rate_params <- c("p_local_dup", "p_distal_dup", "p_del_chunk")
-    shape_params <- c("local_shape", "local_scale", "distal_shape",
-                      "distal_scale", "del_shape", "del_scale")
 
     gen_list <- lapply(seq_along(all_p), function(i) {
       p <- all_p[[i]]
       valid <- p[is.finite(distance)]
       if (nrow(valid) == 0) return(NULL)
       d <- copy(valid)
-      # Transform rates to natural scale
-      for (j in 1:3) {
+      for (j in seq_along(PARAMS)) {
         pn <- PARAMS[[j]]$name
         set(d, j = pn, value = 10^d[[pn]])
       }
@@ -802,31 +893,18 @@ server <- function(input, output, session) {
 
     gen_dt[, gen_f := factor(gen)]
 
-    # Rates + diagnostics (log scale for rates)
     diag_params <- c(rate_params, "n_units", "n_gens")
     melt_rates <- melt(gen_dt[, c("gen_f", diag_params), with = FALSE],
                        id.vars = "gen_f", variable.name = "param", value.name = "value")
-    p1 <- ggplot(melt_rates, aes(x = gen_f, y = value)) +
+    ggplot(melt_rates, aes(x = gen_f, y = value)) +
       geom_violin(fill = "darkorange", alpha = 0.4, scale = "width", linewidth = 0.3) +
       geom_jitter(width = 0.15, size = 0.2, alpha = 0.15) +
       facet_wrap(~ param, scales = "free_y", nrow = 1) +
       scale_y_log10() +
-      theme_classic(base_size = 9) +
+      theme_classic(base_size = 10) +
       theme(strip.background = element_blank()) +
-      labs(x = "Generation", y = NULL, title = "Rates + diagnostics (n_units, n_gens)")
-
-    # Shape/scale (linear)
-    melt_shapes <- melt(gen_dt[, c("gen_f", shape_params), with = FALSE],
-                        id.vars = "gen_f", variable.name = "param", value.name = "value")
-    p2 <- ggplot(melt_shapes, aes(x = gen_f, y = value)) +
-      geom_violin(fill = "darkorange", alpha = 0.4, scale = "width", linewidth = 0.3) +
-      geom_jitter(width = 0.15, size = 0.2, alpha = 0.15) +
-      facet_wrap(~ param, scales = "free_y", nrow = 1) +
-      theme_classic(base_size = 9) +
-      theme(strip.background = element_blank()) +
-      labs(x = "Generation", y = NULL, title = "Chunk-size parameters")
-
-    cowplot::plot_grid(p1, p2, ncol = 1)
+      labs(x = "Generation", y = NULL,
+           title = "Rate posteriors + diagnostics across ABC iterations")
   }, res = 100)
 
   # --- Best Fit Explorer ---
@@ -845,15 +923,10 @@ server <- function(input, output, session) {
       med_far     = round(10^top$med_far),
       near_frac   = round(top$near_frac, 2),
       mean_load   = round(top$mean_load, 1),
+      n_units     = top$n_units,
       p_local     = signif(10^top$p_local_dup, 2),
       p_distal    = signif(10^top$p_distal_dup, 2),
-      p_del       = signif(10^top$p_del_chunk, 2),
-      local_shp   = round(top$local_shape, 1),
-      local_scl   = round(top$local_scale, 1),
-      distal_shp  = round(top$distal_shape, 1),
-      distal_scl  = round(top$distal_scale, 0),
-      del_shp     = round(top$del_shape, 1),
-      del_scl     = round(top$del_scale, 1)
+      p_del       = signif(10^top$p_del_chunk, 2)
     )
   }, digits = 3)
 
@@ -868,7 +941,7 @@ server <- function(input, output, session) {
 
     withProgress(message = "Re-running best particle...", value = 0.3, {
       ck <- get_clock()
-      sim_args <- params_to_args(row, ck$mu_compressed)
+      sim_args <- params_to_args(row, ck$mu_compressed, state$fixed_vals)
       sim <- suppressWarnings(run_sim_ps(
         max_units = 100000, max_t = ck$sim_gens, init_l = input$init_l,
         init_k0 = 10,
