@@ -4,22 +4,28 @@
 \alias{plot_mutation_load}
 \title{Plot per-monomer mutation load relative to the array consensus}
 \usage{
-plot_mutation_load(ps_results, i, counts = NULL, bins = 50, base_size = 6)
+plot_mutation_load(
+  sim,
+  counts = NULL,
+  bins = 80,
+  base_size = 11,
+  fill = "firebrick"
+)
 }
 \arguments{
-\item{ps_results}{Output from \code{\link{run_sim_ps}}.}
-
-\item{i}{Integer. Replicate index to plot.}
+\item{sim}{Output from \code{\link{run_sim_ps}}.}
 
 \item{counts}{Optional. Pre-computed output from
-\code{\link{counts_long_nogap}} for this replicate. If \code{NULL}
-(default), it is computed internally. Pass a pre-computed value when
-calling multiple plot functions on the same replicate to avoid redundant
-computation.}
+\code{\link{counts_long_nogap}}. If \code{NULL} (default), it is computed
+internally. Pass a pre-computed value when calling multiple plot functions
+to avoid redundant computation.}
 
-\item{bins}{Integer. Number of histogram bins. Default 50.}
+\item{bins}{Integer. Number of histogram bins. Default 80.}
 
-\item{base_size}{Numeric. Base font size. Default 6.}
+\item{base_size}{Numeric. Base font size. Default 11.}
+
+\item{fill}{Character. Fill colour for histogram bars.
+Default \code{"firebrick"}.}
 }
 \value{
 A \code{ggplot2} object.
@@ -34,12 +40,11 @@ effect of duplication.
 }
 \examples{
 \dontrun{
-sim <- run_sim_ps(n = 1, max_t = 500, mu_total = 3e-5)
-plot_mutation_load(sim, i = 1)
+sim <- run_sim_ps(max_t = 500, mu_total = 3e-5)
+plot_mutation_load(sim)
 
 # Pre-compute counts to share with plot_consensus_support()
-mono <- sim$monomers_list[[1]]
-ct   <- counts_long_nogap(mono$bponly)
-plot_mutation_load(sim, i = 1, counts = ct)
+ct <- counts_long_nogap(sim$monomers$bponly)
+plot_mutation_load(sim, counts = ct)
 }
 }

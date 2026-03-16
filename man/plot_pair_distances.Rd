@@ -4,17 +4,18 @@
 \alias{plot_pair_distances}
 \title{Plot distance distribution between identical repeat pairs}
 \usage{
-plot_pair_distances(ps_results, i, bins = 50, base_size = 6)
+plot_pair_distances(sim, bins = 80, base_size = 11, fill = "steelblue")
 }
 \arguments{
-\item{ps_results}{Output from \code{\link{run_sim_ps}}.}
+\item{sim}{Output from \code{\link{run_sim_ps}}.}
 
-\item{i}{Integer. Replicate index to plot.}
-
-\item{bins}{Integer. Number of histogram bins. Default 50.}
+\item{bins}{Integer. Number of histogram bins. Default 80.}
 
 \item{base_size}{Numeric. Base font size passed to
-\code{theme_classic}. Default 6.}
+\code{theme_classic}. Default 11.}
+
+\item{fill}{Character. Fill colour for histogram bars.
+Default \code{"steelblue"}.}
 }
 \value{
 A \code{ggplot2} object.
@@ -28,7 +29,7 @@ broad or bimodal distribution suggests distal duplications as well.
 }
 \examples{
 \dontrun{
-sim <- run_sim_ps(n = 1, max_t = 500, mu_total = 3e-5)
-plot_pair_distances(sim, i = 1)
+sim <- run_sim_ps(max_t = 500, mu_total = 3e-5)
+plot_pair_distances(sim)
 }
 }

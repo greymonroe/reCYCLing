@@ -9,6 +9,12 @@
 #'   columns \code{bponly}, \code{num}, \code{pos}, \code{chrom}, \code{hap},
 #'   \code{sample}, and \code{dir}. Typically an element of
 #'   \code{ps_results$monomers_list}.
+#' @param max_group_size Integer. Maximum number of identical monomers in a
+#'   single group before pairs are sampled instead of fully enumerated. Groups
+#'   larger than this threshold contribute at most
+#'   \code{max_group_size * (max_group_size - 1) / 2} pairs via random
+#'   sampling. Default \code{Inf} (enumerate all pairs). Set to e.g. 500 to
+#'   avoid memory issues with very large homogeneous arrays.
 #'
 #' @return A \code{data.table} with one row per identical pair. Columns are
 #'   suffixed \code{1} and \code{2} for the two members of each pair:
@@ -25,14 +31,29 @@
 #' ps   <- pairs_identical(mono)
 #' head(ps)
 #' }
-pairs_identical <- function(repeats) {
+pairs_identical <- function(repeats, max_group_size = Inf) {
   x <- as.data.table(repeats)
   x[, id := .I]
 
   pair_idx <- x[, {
-    if (.N < 2L) NULL else {
-      cmb <- utils::combn(id, 2L)
-      data.table(id1 = cmb[1, ], id2 = cmb[2, ])
+    if (.N < 2L) {
+      NULL
+    } else if (.N <= max_group_size) {
+      # Generate pairs without materializing full combn matrix
+      ids <- id
+      n   <- length(ids)
+      id1 <- rep(ids, times = (n - 1L):0)
+      id2 <- unlist(lapply(seq_len(n - 1L), function(j) ids[(j + 1L):n]),
+                     use.names = FALSE)
+      data.table(id1 = id1, id2 = id2)
+    } else {
+      # Sample pairs for very large groups to avoid memory blowup
+      ids <- id
+      n_sample <- as.integer(max_group_size * (max_group_size - 1L) / 2L)
+      s1 <- sample(ids, n_sample, replace = TRUE)
+      s2 <- sample(ids, n_sample, replace = TRUE)
+      keep <- s1 < s2
+      data.table(id1 = s1[keep], id2 = s2[keep])
     }
   }, by = bponly]
 

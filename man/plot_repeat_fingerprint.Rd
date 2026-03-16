@@ -5,8 +5,7 @@
 \title{Dot-plot fingerprint of identical repeat-unit pairs}
 \usage{
 plot_repeat_fingerprint(
-  ps_results,
-  i,
+  sim,
   rotate = FALSE,
   zoom = NULL,
   ptsize = 0.01,
@@ -16,9 +15,7 @@ plot_repeat_fingerprint(
 )
 }
 \arguments{
-\item{ps_results}{Output from \code{\link{run_sim_ps}}.}
-
-\item{i}{Integer. Replicate index to plot.}
+\item{sim}{Output from \code{\link{run_sim_ps}}.}
 
 \item{rotate}{Logical. If \code{TRUE}, rotate the plot 45 degrees using grid
 graphics (draws directly to the active device and returns \code{NULL}). If
@@ -49,8 +46,8 @@ while off-diagonal blocks indicate distal duplications.
 }
 \examples{
 \dontrun{
-sim <- run_sim_ps(n = 1, max_t = 500, mu_total = 3e-5)
-plot_repeat_fingerprint(sim, i = 1)
-plot_repeat_fingerprint(sim, i = 1, zoom = c(0, 200))
+sim <- run_sim_ps(max_t = 500, mu_total = 3e-5)
+plot_repeat_fingerprint(sim)
+plot_repeat_fingerprint(sim, zoom = c(0, 200))
 }
 }

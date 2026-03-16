@@ -2,17 +2,16 @@
 % Please edit documentation in R/entropy.R
 \name{get_sim_entropies}
 \alias{get_sim_entropies}
-\title{Summarise entropy across simulation replicates}
+\title{Summarise entropy for a simulation result}
 \usage{
-get_sim_entropies(ps_results)
+get_sim_entropies(sim)
 }
 \arguments{
-\item{ps_results}{Output from \code{\link{run_sim_ps}}.}
+\item{sim}{Output from \code{\link{run_sim_ps}}.}
 }
 \value{
-A \code{data.table} with one row per replicate and columns:
+A one-row \code{data.table} with columns:
   \describe{
-    \item{i}{Replicate index.}
     \item{H}{Shannon entropy of the final array (bits).}
     \item{total}{Total number of monomers in the final array.}
     \item{uniqueN}{Number of distinct monomer sequences.}
@@ -20,12 +19,12 @@ A \code{data.table} with one row per replicate and columns:
   }
 }
 \description{
-Extracts the final Shannon entropy, total array size, and unique-monomer
-count for each replicate in a \code{\link{run_sim_ps}} result.
+Extracts the Shannon entropy, total array size, and unique-monomer
+count from a \code{\link{run_sim_ps}} result.
 }
 \examples{
 \dontrun{
-sim <- run_sim_ps(n = 3, max_t = 200, mu_total = 3e-5)
+sim <- run_sim_ps(max_t = 200, mu_total = 3e-5)
 get_sim_entropies(sim)
 }
 }

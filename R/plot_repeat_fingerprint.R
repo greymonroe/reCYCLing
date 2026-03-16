@@ -39,7 +39,7 @@
                  colour = "grey90", linewidth = 0.2, alpha = gridalpha) +
     geom_point(size = ptsize, shape = 15, alpha = 1, col = ptcol) +
     coord_fixed() +
-    theme_classic(base_size = 6) +
+    theme_classic(base_size = 11) +
     labs(x = NULL, y = NULL) +
     scale_x_continuous(expand = c(0, 0), position = "top",
                        limits = lims, breaks = grid_breaks) +
@@ -82,8 +82,7 @@
 #' diagonal streaks near the main diagonal indicate local (tandem) duplications,
 #' while off-diagonal blocks indicate distal duplications.
 #'
-#' @param ps_results Output from \code{\link{run_sim_ps}}.
-#' @param i Integer. Replicate index to plot.
+#' @param sim Output from \code{\link{run_sim_ps}}.
 #' @param rotate Logical. If \code{TRUE}, rotate the plot 45 degrees using grid
 #'   graphics (draws directly to the active device and returns \code{NULL}). If
 #'   \code{FALSE} (default), return a \code{ggplot2} object.
@@ -101,19 +100,21 @@
 #'
 #' @examples
 #' \dontrun{
-#' sim <- run_sim_ps(n = 1, max_t = 500, mu_total = 3e-5)
-#' plot_repeat_fingerprint(sim, i = 1)
-#' plot_repeat_fingerprint(sim, i = 1, zoom = c(0, 200))
+#' sim <- run_sim_ps(max_t = 500, mu_total = 3e-5)
+#' plot_repeat_fingerprint(sim)
+#' plot_repeat_fingerprint(sim, zoom = c(0, 200))
 #' }
-plot_repeat_fingerprint <- function(ps_results, i,
+plot_repeat_fingerprint <- function(sim,
                                     rotate   = FALSE,
                                     zoom     = NULL,
                                     ptsize   = 0.01,
                                     gridalpha = 0,
                                     gbreaks  = 20,
                                     ptcol    = "black") {
-  ps    <- as.data.table(ps_results$ps_list[[i]])
-  monos <- as.data.table(ps_results$monomers_list[[i]])
+  ps    <- as.data.table(sim$ps)
+  monos <- as.data.table(sim$monomers)
+  # Compute pairs on the fly if sim was run with compute_pairs = FALSE
+  if (nrow(ps) == 0 && nrow(monos) > 1) ps <- pairs_identical(monos)
 
   .fingerprint_impl(ps, kb = monos,
                     rotate    = rotate,

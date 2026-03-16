@@ -4,9 +4,12 @@
 #' sequences of equal length. Positions whose consensus base is a gap character
 #' are removed and the remaining positions are renumbered.
 #'
-#' @param rawseqs Character vector of aligned sequences (all must have the same
-#'   \code{nchar()}). Typically \code{monomers_list[[i]]$bponly} from
-#'   \code{\link{run_sim_ps}}.
+#' When sequences have unequal lengths (e.g. after indel mutations), they are
+#' right-padded with the gap character to the length of the longest sequence
+#' before counting.
+#'
+#' @param rawseqs Character vector of aligned sequences. Typically
+#'   \code{monomers_list[[i]]$bponly} from \code{\link{run_sim_ps}}.
 #' @param gap_char Character. The gap symbol. Default \code{"-"}.
 #' @param tie_break_levels Character vector giving the priority order for
 #'   breaking consensus ties. The gap character is always given lowest priority
@@ -40,9 +43,17 @@ counts_long_nogap <- function(rawseqs,
   stopifnot(length(rawseqs) >= 2L)
   x  <- as.character(rawseqs)
   Ls <- nchar(x)
-  if (length(unique(Ls)) != 1L)
-    stop("All sequences must have the same aligned length")
-  L <- Ls[1L]
+
+  # Pad sequences to equal length if indels produced variable lengths
+  if (length(unique(Ls)) != 1L) {
+    L <- max(Ls)
+    x <- vapply(x, function(s) {
+      pad <- L - nchar(s)
+      if (pad > 0L) paste0(s, strrep(gap_char, pad)) else s
+    }, FUN.VALUE = character(1), USE.NAMES = FALSE)
+  } else {
+    L <- Ls[1L]
+  }
   n <- length(x)
 
   chars     <- strsplit(x, "", fixed = TRUE)
@@ -99,11 +110,16 @@ counts_long_nogap <- function(rawseqs,
 #' differs from the consensus sequence. This gives a simple per-monomer
 #' measure of divergence.
 #'
-#' @param rawseqs Character vector of aligned sequences (all same length).
+#' When sequences have unequal lengths (e.g. after indel mutations), they are
+#' right-padded with the gap character before comparison.
+#'
+#' @param rawseqs Character vector of sequences.
 #' @param consensus A \code{data.table} with columns \code{pos} and
 #'   \code{consensus} (one row per alignment position), as returned by
 #'   filtering \code{counts_long_nogap()} to rows where
 #'   \code{symbol == consensus}.
+#' @param gap_char Character. The gap symbol used for padding. Default
+#'   \code{"-"}.
 #'
 #' @return An integer vector of the same length as \code{rawseqs}, giving the
 #'   number of mismatches to consensus for each sequence.
@@ -118,16 +134,30 @@ counts_long_nogap <- function(rawseqs,
 #' load <- mu_load_from_consensus(mono$bponly, cons)
 #' hist(load)
 #' }
-mu_load_from_consensus <- function(rawseqs, consensus) {
+mu_load_from_consensus <- function(rawseqs, consensus, gap_char = "-") {
   x  <- as.character(rawseqs)
   Ls <- nchar(x)
-  if (length(unique(Ls)) != 1L)
-    stop("All sequences must have the same aligned length")
-  L <- Ls[1L]
-  consensus <- consensus[order(pos)]
-  if (length(consensus$consensus) != L)
-    stop("Consensus length must match sequence length")
 
-  chars   <- strsplit(x, "", fixed = TRUE)
-  sapply(chars, function(bases) sum(bases != consensus$consensus))
+  consensus <- consensus[order(pos)]
+  cons_len  <- length(consensus$consensus)
+
+  # Pad sequences to consensus length if needed
+  L <- max(max(Ls), cons_len)
+  if (length(unique(Ls)) != 1L || Ls[1L] != L) {
+    x <- vapply(x, function(s) {
+      pad <- L - nchar(s)
+      if (pad > 0L) paste0(s, strrep(gap_char, pad)) else s
+    }, FUN.VALUE = character(1), USE.NAMES = FALSE)
+  }
+
+  cons_vec <- consensus$consensus
+  if (length(cons_vec) < L) {
+    cons_vec <- c(cons_vec, rep(gap_char, L - length(cons_vec)))
+  }
+
+  chars <- strsplit(x, "", fixed = TRUE)
+  vapply(chars, function(bases) {
+    b <- bases[seq_len(L)]
+    sum(b != cons_vec, na.rm = TRUE)
+  }, FUN.VALUE = integer(1))
 }

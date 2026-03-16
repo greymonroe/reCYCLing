@@ -6,7 +6,7 @@
 
 Long-read sequencing is revealing repeat-rich genome features—centromeres, satellite arrays, and other tandem repeats—that were previously difficult to assemble and interpret. Understanding what we see in these regions often comes down to building intuition for how tandem arrays evolve under duplication, deletion, and mutation.
 
-`reCYCLing` is an R toolkit for **simulating** the evolution of tandem repeat arrays (satellite-like monomers derived from a common ancestor) and for **analyzing** the resulting arrays using diagnostics that mirror how we interrogate real repeat architectures (e.g., arrays identified with TRASH-like workflows). A core analysis theme is leveraging **pairs of identical monomers** to study spatial structure and duplication signatures.
+`reCYCLing` is an R toolkit for **simulating** the evolution of tandem repeat arrays (satellite-like monomers derived from a common ancestor), **analyzing** the resulting arrays using diagnostics that mirror how we interrogate real repeat architectures, and **inferring evolutionary parameters** from observed data via Approximate Bayesian Computation (ABC).
 
 ---
 
@@ -21,116 +21,163 @@ devtools::install_github("greymonroe/reCYCLing")
 
 ## Quick start
 
-Simulate a single replicate from a fixed ancestral monomer sequence (so results are reproducible), then generate core diagnostic plots.
+Simulate a single replicate, then generate core diagnostic plots:
 
 ```r
 library(reCYCLing)
 
-# Define a fixed ancestral monomer so results are reproducible
-ancestor <- paste(sample(c("A","C","G","T"), 178, replace = TRUE), collapse = "")
-
 sim <- run_sim_ps(
-  n = 1,                    # number of replicates
   init_l = 178,             # monomer length (bp)
   init_k0 = 10,             # initial copy number
-  init_sequence_type = "given",
-  ancestor_seq = ancestor,
   max_units = 10000,        # stop when array reaches this many monomers
   max_t = 1e6,              # max generations (time cap)
   mu_total = 5e-5,          # per-base mutation rate
-  p_local_dup = 4e-4,       # local duplication probability per unit per generation
-  p_distal_dup = 1e-5,      # distal duplication probability per unit per generation
-  p_del_chunk = 1e-5,       # chunk deletion probability per unit per generation
+  p_local_dup = 4e-4,       # local duplication rate per unit per generation
+  p_distal_dup = 1e-5,      # distal duplication rate per unit per generation
+  p_del_chunk = 1e-5,       # chunk deletion rate per unit per generation
   verbose = FALSE
 )
 
-plot_repeat_fingerprint(sim, i = 1, ptsize = 0.5)
-plot_pair_distances(sim, i = 1)
-plot_mutation_load(sim, i = 1)
+# Multi-panel summary
+plot_ps_summary(sim)
+
+# Individual plots
+plot_repeat_fingerprint(sim)
+plot_pair_distances(sim)
+plot_mutation_load(sim)
 ```
 
 ---
 
 ## What `run_sim_ps()` returns
 
-`run_sim_ps()` returns a **named list with five elements**, each a list of length `n` (one entry per replicate):
+A named list with five elements:
 
-- `monomers_list`: final array as a `data.table` (one row per monomer; key columns include `num` position and `bponly` sequence)
-- `ps_list`: all **pairs of identical monomers** (`pairs_identical()` output), with positions `num1` and `num2`
-- `L_vec_list`: array length trajectory over generations
-- `H_vec_list`: Shannon entropy trajectory over generations
-- `N_vec_list`: unique-monomer-count trajectory over generations
+| Element | Description |
+|---------|-------------|
+| `monomers` | `data.table` of the final array (columns: `num`, `bponly`, `pos`, `chrom`, `hap`, `sample`, `dir`) |
+| `ps` | All pairs of identical monomers (`pairs_identical()` output). Empty if `compute_pairs = FALSE`. |
+| `L_vec` | Array length trajectory over generations |
+| `H_vec` | Shannon entropy trajectory (final value only with C++ backend) |
+| `N_vec` | Unique monomer count trajectory (final value only with C++ backend) |
 
-Example:
-
-```r
-mono <- sim$monomers_list[[1]]
-ps   <- sim$ps_list[[1]]
-
-head(mono)
-head(ps[, c("bponly","num1","num2")])
-
-# Quick summaries
-length(unique(mono$bponly))
-shannon_entropy(mono$bponly)
-```
+For large arrays (>10K units), use `compute_pairs = FALSE` to skip the O(n^2) pair enumeration. Plot functions will compute pairs on the fly when needed.
 
 ---
 
-## Core ideas and controls
+## Simulation engine
 
-Each generation, the simulator applies four forces to an array of monomer units:
+Each generation, the simulator applies four evolutionary forces:
 
-| Process | Controls |
-|---|---|
-| **Local duplication** | tandem copy–paste of a nearby chunk |
-| **Distal duplication** | copy–paste to a more distant position (optional inversion) |
-| **Chunk deletion** | removal of a consecutive block of monomers |
-| **Per-base mutation** | substitutions by default (optional indels) |
+| Process | Description |
+|---------|-------------|
+| **Local duplication** | Tandem copy-paste of a nearby chunk |
+| **Distal duplication** | Copy-paste to a distant position (optional inversion) |
+| **Chunk deletion** | Removal of a consecutive block of monomers |
+| **Per-base mutation** | Substitutions (default), optional insertions/deletions |
 
-Key knobs you’ll typically adjust:
+Two backends are available:
+
+- **C++ backend** (default): ~100x faster. Uses deferred mutations—mutations accumulate as a counter per monomer and are only materialized on duplication using the Jukes-Cantor model. Substitutions only.
+- **R backend**: Slower but supports indels (`p_ins`, `p_del_bp`). Selected automatically when indels are requested.
+
+Key parameters:
 
 - **Rates (per unit per generation):** `p_local_dup`, `p_distal_dup`, `p_del_chunk`
-- **Distal inversion:** `p_invert_distal`
-- **Mutation (per base per generation):** `mu_total` and optionally `p_sub`, `p_ins`, `p_del_bp`
+- **Mutation (per base per generation):** `mu_total`
 - **Chunk-size distributions:** `local_dist`, `distal_dist`, `del_dist`
 
-Chunk-size distributions are specified as lists, e.g.:
+Chunk-size distributions are specified as lists:
 
 ```r
-local_dist  <- list(type="gamma", shape=2, scale=15)
-distal_dist <- list(type="gamma", shape=2, scale=500)
-del_dist    <- list(type="geom",  prob=0.1)
+local_dist  <- list(type = "gamma", shape = 2, scale = 15)
+distal_dist <- list(type = "gamma", shape = 2, scale = 500)
+del_dist    <- list(type = "geom",  prob = 0.1)
 ```
 
-Supported `type` values include: `"fixed"`, `"poisson"`, `"normal"`, `"geom"`, `"unif"`, `"gamma"`.
+Supported types: `"fixed"`, `"poisson"`, `"normal"`, `"geom"`, `"unif"`, `"gamma"`.
 
 ---
 
 ## Diagnostic plots
 
-Each diagnostic view is available as a standalone plotting function:
+| Function | What it shows |
+|----------|---------------|
+| `plot_repeat_fingerprint()` | Dot-plot of identical pairs (self-similarity / duplication structure) |
+| `plot_pair_distances()` | Distance distribution of identical pairs (local vs distal signature) |
+| `plot_copy_numbers()` | Copies per unique monomer sequence |
+| `plot_mutation_load()` | Mismatches per monomer relative to consensus |
+| `plot_consensus_support()` | Per-position consensus support across the array |
+| `plot_ps_summary()` | Combined multi-panel overview |
 
-- `plot_repeat_fingerprint()` — dot-plot of identical pairs (self-similarity / duplication structure)
-- `plot_pair_distances()` — distance distribution of identical pairs (local vs distal signature)
-- `plot_copy_numbers()` — copies per unique monomer sequence
-- `plot_mutation_load()` — mismatches per monomer relative to consensus
-- `plot_consensus_support()` — per-position consensus support across the array
-- `plot_ps_summary()` — combined multi-panel overview
+---
 
-Tip: `plot_mutation_load()` and `plot_consensus_support()` both use per-position counts; compute once and reuse:
+## ABC parameter inference
+
+`reCYCLing` includes an SMC-ABC (Sequential Monte Carlo Approximate Bayesian Computation) framework for inferring simulation parameters that reproduce observed summary statistics from real tandem repeat arrays.
+
+### What is SMC-ABC?
+
+ABC is used when you can simulate from a model but can't write down the likelihood function. SMC-ABC maintains a **population of parameter vectors** (particles) that evolves over generations:
+
+1. **Generation 0**: Sample particles broadly from the prior
+2. **Score**: Run a simulation for each particle, compute summary statistics, measure distance to the target
+3. **Select**: Keep the top fraction of particles
+4. **Perturb**: Jitter the survivors to propose new particles for the next generation
+5. **Repeat**: Distance threshold tightens automatically as the population improves
+
+The distance function is auto-scaled: after Generation 0, the SD of each summary statistic is computed from the pilot batch and used to normalize all distances. This ensures each stat contributes proportionally without manual weight tuning.
+
+### Summary statistics
+
+The ABC fits four summary statistics to the target:
+
+- **Distance mode 1 & 2**: The two peaks of the bimodal identical-pair distance distribution (fit via 2-component Gaussian mixture in log10 space)
+- **Weight of mode 1**: Relative contribution of the near-distance peak
+- **Mean mutation load**: Average mismatches per monomer relative to the consensus
+
+### Interactive app
 
 ```r
-counts <- counts_long_nogap(sim$monomers_list[[1]]$bponly)
-plot_mutation_load(sim, i = 1, counts = counts)
-plot_consensus_support(sim, i = 1, counts = counts)
+launch_abc()
 ```
+
+Opens a Shiny dashboard for real-time ABC inference with live convergence plots, parameter posteriors, failure rate tracking, and a Best Fit Explorer for visualizing top-ranked simulations.
+
+### Command-line batch script
+
+```bash
+Rscript inst/scripts/smc_abc.R \
+  --target_mode1 100 --target_mode2 2000 --target_weight1 0.3 \
+  --target_load 10 --particles 200 --max_generations 20 \
+  --max_units 20000 --outdir results/run1
+```
+
+The CLI script runs serially (single core) with the same algorithm. Use `--help` for all options.
+
+### Performance notes
+
+- The C++ simulation backend with deferred mutations handles large arrays efficiently
+- For ABC, `compute_pairs = FALSE` is used automatically to skip the O(n^2) pair table
+- Pairwise distances are estimated via sampling (caps at 5K pairs per sequence group)
+- The 2-component Gaussian mixture fit subsamples to 10K distances
+- Failed particles are retried to fill all slots each generation
+
+---
+
+## Interactive explorer
+
+```r
+launch_explorer()
+```
+
+Opens a Shiny app for interactive parameter exploration — tweak sliders and immediately see the resulting array diagnostics.
 
 ---
 
 ## Vignette
 
-For a worked walkthrough and more examples:
+For a worked walkthrough:
 
 ```r
 vignette("reCYCLing-intro")
@@ -140,4 +187,4 @@ vignette("reCYCLing-intro")
 
 ## Notes
 
-This is a research codebase developed mainly for internal use in the Monroe Lab; it is evolving and documentation may change. Please feel free to try - contribute to Issues if you would like
+This is a research codebase developed mainly for internal use in the Monroe Lab; it is evolving and documentation may change. Please feel free to try — contribute to Issues if you would like.

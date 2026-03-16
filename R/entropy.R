@@ -46,8 +46,8 @@ shannon_entropyplus <- function(x) {
   data.table(H          = H,
              uniqueN    = uN,
              L          = L,
-             H_logL     = H / log(L),
-             H_logUniqueN = H / log(uN))
+             H_logL     = if (L > 1) H / log(L) else NA_real_,
+             H_logUniqueN = if (uN > 1) H / log(uN) else NA_real_)
 }
 
 #' Sliding-window entropy along a monomer array
@@ -74,7 +74,7 @@ kb_row_window_entropy <- function(kb, N) {
   kb <- as.data.table(kb)
 
   out_list <- pbapply::pblapply(seq_len(nrow(kb) - N), function(i) {
-    sub_idx <- i:min(nrow(kb), i + N)
+    sub_idx <- i:(i + N - 1L)
     res     <- shannon_entropyplus(kb$bponly[sub_idx])
     res$pos <- i
     res
@@ -83,16 +83,15 @@ kb_row_window_entropy <- function(kb, N) {
   rbindlist(out_list, fill = TRUE)
 }
 
-#' Summarise entropy across simulation replicates
+#' Summarise entropy for a simulation result
 #'
-#' Extracts the final Shannon entropy, total array size, and unique-monomer
-#' count for each replicate in a \code{\link{run_sim_ps}} result.
+#' Extracts the Shannon entropy, total array size, and unique-monomer
+#' count from a \code{\link{run_sim_ps}} result.
 #'
-#' @param ps_results Output from \code{\link{run_sim_ps}}.
+#' @param sim Output from \code{\link{run_sim_ps}}.
 #'
-#' @return A \code{data.table} with one row per replicate and columns:
+#' @return A one-row \code{data.table} with columns:
 #'   \describe{
-#'     \item{i}{Replicate index.}
 #'     \item{H}{Shannon entropy of the final array (bits).}
 #'     \item{total}{Total number of monomers in the final array.}
 #'     \item{uniqueN}{Number of distinct monomer sequences.}
@@ -102,19 +101,16 @@ kb_row_window_entropy <- function(kb, N) {
 #'
 #' @examples
 #' \dontrun{
-#' sim <- run_sim_ps(n = 3, max_t = 200, mu_total = 3e-5)
+#' sim <- run_sim_ps(max_t = 200, mu_total = 3e-5)
 #' get_sim_entropies(sim)
 #' }
-get_sim_entropies <- function(ps_results) {
-  entropies <- rbindlist(lapply(seq_along(ps_results$monomers_list), function(i) {
-    mono <- ps_results$monomers_list[[i]]
-    data.table(
-      i       = i,
-      H       = shannon_entropy(mono$bponly),
-      total   = nrow(mono),
-      uniqueN = uniqueN(mono$bponly)
-    )
-  }))
-  entropies[, meanN := total / uniqueN]
-  entropies
+get_sim_entropies <- function(sim) {
+  mono <- sim$monomers
+  dt <- data.table(
+    H       = shannon_entropy(mono$bponly),
+    total   = nrow(mono),
+    uniqueN = uniqueN(mono$bponly)
+  )
+  dt[, meanN := total / uniqueN]
+  dt
 }

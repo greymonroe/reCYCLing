@@ -12,9 +12,8 @@ counts_long_nogap(
 )
 }
 \arguments{
-\item{rawseqs}{Character vector of aligned sequences (all must have the same
-\code{nchar()}). Typically \code{monomers_list[[i]]$bponly} from
-\code{\link{run_sim_ps}}.}
+\item{rawseqs}{Character vector of aligned sequences. Typically
+\code{monomers_list[[i]]$bponly} from \code{\link{run_sim_ps}}.}
 
 \item{gap_char}{Character. The gap symbol. Default \code{"-"}.}
 
@@ -39,6 +38,11 @@ A long-format \code{data.table} with one row per
 Computes per-position symbol counts and proportions across a set of aligned
 sequences of equal length. Positions whose consensus base is a gap character
 are removed and the remaining positions are renumbered.
+}
+\details{
+When sequences have unequal lengths (e.g. after indel mutations), they are
+right-padded with the gap character to the length of the longest sequence
+before counting.
 }
 \examples{
 \dontrun{

@@ -11,9 +11,10 @@ vignette: >
 knitr::opts_chunk$set(
   collapse = TRUE,
   comment  = "#>",
-  fig.width  = 6,
-  fig.height = 4,
-  out.width  = "100%"
+  fig.width  = 7,
+  fig.height = 4.5,
+  out.width  = "100%",
+  dpi       = 300
 )
 set.seed(42)
 library(data.table)
@@ -47,114 +48,73 @@ ancestor <- paste(sample(c("A","C","G","T"), 178, replace = TRUE),
                   collapse = "")
 
 sim <- run_sim_ps(
-  n                  = 1,         # one replicate
-  init_l             = 178,        # monomer length (bp)
+  init_l             = 178,       # monomer length (bp)
   init_k0            = 10,        # starting copy number
   init_sequence_type = "given",
   ancestor_seq       = ancestor,
-  max_units          = 10000,       # stop when array reaches 10000 monomers
+  max_units          = 10000,     # stop when array reaches 10 000 monomers
   mu_total           = 5e-5,      # per-base mutation rate
-  p_local_dup        = 0.0004,   # local duplication probability per unit
-  p_distal_dup       = 1e-5,    # distal duplication probability per unit
-  p_del_chunk        = 1e-5,         # no deletions in this example
+  p_local_dup        = 0.0004,    # local duplication probability per unit
+  p_distal_dup       = 1e-5,      # distal duplication probability per unit
+  p_del_chunk        = 1e-5,      # deletion probability per unit
   verbose            = FALSE
 )
-
-# immediately plot repeat array (more on this plot later)
-plot_repeat_fingerprint(sim, i = 1, ptsize = 0.5)
-plot_pair_distances(sim, i = 1)
-plot_mutation_load(sim, i = 1)
-
-
 ```
 
 ---
 
-## Understanding the output object
+## Understanding the output
 
-`run_sim_ps()` returns a **named list with five elements**, each a list of
-length `n` (one entry per replicate). For a single replicate (`i = 1`):
+`run_sim_ps()` returns a named list with five elements:
 
 ```{r output_structure}
 names(sim)
 ```
 
-### `monomers_list` — the final array
+### `monomers` — the final array
 
-Each element is a `data.table` with one row per monomer in the final array.
+A `data.table` with one row per monomer in the final array.
 
 ```{r monomers}
-mono <- sim$monomers_list[[1]]
-head(mono)
-nrow(mono)          # total monomers in the final array
+head(sim$monomers)
+nrow(sim$monomers)   # total monomers in the final array
 ```
-
-Column descriptions:
 
 | Column | Description |
 |---|---|
 | `num` | Position index along the array (1 = first monomer) |
 | `bponly` | The monomer DNA sequence |
-| `pos` | Sub-position within the locus (always 1 for simple arrays) |
-| `chrom` | Chromosome label |
-| `hap` | Haplotype label |
-| `sample` | Sample label |
-| `dir` | Strand direction |
-
-The key columns for most analyses are **`num`** (position) and **`bponly`**
-(sequence).
+| `dir` | Strand direction (`+` or `-`; reflects inversions from distal duplication) |
 
 ```{r monomers_summary}
 # How many unique sequences are in the array?
-length(unique(mono$bponly))
+length(unique(sim$monomers$bponly))
 
 # Shannon entropy — higher = more diversity among monomers
-shannon_entropy(mono$bponly)
+shannon_entropy(sim$monomers$bponly)
 ```
 
-### `ps_list` — all pairs of identical monomers
+### `ps` — all pairs of identical monomers
 
-Each element is a `data.table` of every unordered pair of monomers that share
-the same sequence. This is the foundation of the fingerprint plot.
+A `data.table` of every unordered pair of monomers that share the same
+sequence. This is the foundation of the fingerprint plot.
 
 ```{r ps}
-ps <- sim$ps_list[[1]]
-head(ps[, c("bponly", "num1", "num2")])
-nrow(ps)   # total number of identical pairs
+head(sim$ps[, c("bponly", "num1", "num2")])
+nrow(sim$ps)   # total number of identical pairs
 ```
-
-The key columns are **`num1`** and **`num2`** (positions of the two identical
-monomers) and **`bponly`** (their shared sequence).
 
 ### Trajectory vectors — how the array evolved over time
 
-The three trajectory lists record statistics sampled **each generation**:
-
 ```{r trajectories}
-# Array size (copy number) over generations
-L_traj <- sim$L_vec_list[[1]]
-cat("Generations simulated:", length(L_traj), "\n")
-cat("Starting size:", L_traj[1], "| Final size:", tail(L_traj, 1), "\n")
-
-# Shannon entropy over generations
-H_traj <- sim$H_vec_list[[1]]
-cat("Starting entropy:", round(H_traj[1], 3),
-    "| Final entropy:", round(tail(H_traj, 1), 3), "\n")
-
-# Unique monomer count over generations
-N_traj <- sim$N_vec_list[[1]]
+cat("Generations simulated:", length(sim$L_vec), "\n")
+cat("Starting size:", sim$L_vec[1], "| Final size:", tail(sim$L_vec, 1), "\n")
 ```
-
-You can plot these trajectories to visualise how the array expanded and
-diversified:
 
 ```{r traj_plot, fig.height=3}
 library(ggplot2)
 
-traj <- data.frame(
-  gen    = seq_along(L_traj),
-  size   = L_traj
-)
+traj <- data.frame(gen = seq_along(sim$L_vec), size = sim$L_vec)
 
 ggplot(traj, aes(x = gen, y = size)) +
   geom_line() +
@@ -165,108 +125,113 @@ ggplot(traj, aes(x = gen, y = size)) +
 
 ---
 
-## Individual plot functions
+## Visualising results
 
-Each diagnostic view of the array is available as its own function so you can
-combine, customise, or inspect them independently.
+Each diagnostic view of the array is available as its own plotting function.
 
-### `plot_repeat_fingerprint()` — dot-plot of identical pairs
+### Repeat fingerprint — dot-plot of identical pairs
 
 Each dot represents a pair of identical monomers, placed at their positions
-along both axes. Structure near the diagonal reflects local duplications;
-off-diagonal clusters reveal distal duplications.
+along both axes. Diagonal streaks near the main diagonal reflect local (tandem)
+duplications; off-diagonal clusters reveal distal duplications.
 
-```{r p_fingerprint, fig.height=5}
-plot_repeat_fingerprint(sim, i = 1, ptsize = 0.5)
+```{r p_fingerprint, fig.height=6}
+plot_repeat_fingerprint(sim, ptsize = 0.01)
 ```
 
-### `plot_pair_distances()` — distance between identical pairs
+### Zooming in
 
-Plots the positional separation |num₁ − num₂| of every identical pair on a
-log₁₀ scale. A peak near 1 indicates mostly tandem (local) duplications;
-a heavy tail indicates distal duplications were important.
+The full fingerprint compresses 10,000 positions into a single figure. Use the
+`zoom` parameter to inspect a sub-region in detail:
+
+```{r p_fingerprint_zoom, fig.height=6}
+plot_repeat_fingerprint(sim, zoom = c(4000, 5000), ptsize = 0.3,
+                        gridalpha = 0.3)
+```
+
+### Pair distances — separation between identical pairs
+
+The positional separation |num1 − num2| of every identical pair on a log10
+scale. A peak near 1 indicates mostly tandem (local) duplications; a heavy tail
+or second mode at larger distances indicates distal duplications were important.
 
 ```{r p_dist}
-plot_pair_distances(sim, i = 1)
+plot_pair_distances(sim)
 ```
 
-### `plot_copy_numbers()` — copies per unique monomer sequence
+### Copy numbers — copies per unique monomer sequence
 
-For each distinct monomer sequence, counts how many copies exist in the array
-and plots the distribution. High copy numbers mean many monomers share an
-identical sequence—a signature of homogenisation by repeated duplication.
+For each distinct monomer sequence, counts how many copies exist in the array.
+High copy numbers mean many monomers share an identical sequence—a signature of
+homogenisation by repeated duplication.
 
 ```{r p_cn}
-plot_copy_numbers(sim, i = 1)
+plot_copy_numbers(sim)
 ```
 
-### `plot_mutation_load()` — mismatches relative to consensus
+### Mutation load — mismatches relative to consensus
 
 Computes the consensus sequence across all monomers and counts mismatches for
 each individual monomer. Monomers with load = 0 are identical to the consensus;
 higher loads indicate more diverged copies.
 
 ```{r p_ml}
-plot_mutation_load(sim, i = 1)
+plot_mutation_load(sim)
 ```
 
-### `plot_consensus_support()` — per-position consensus strength
+### Consensus support — per-position conservation
 
 At each alignment position, the proportion of monomers agreeing with the
-consensus base is plotted as a histogram. Values near 1 mean that position
-is strongly conserved; a flat distribution indicates heterogeneity.
+consensus base is plotted. Values near 1 mean that position is strongly
+conserved; a spread distribution indicates heterogeneity.
 
 ```{r p_cs}
-plot_consensus_support(sim, i = 1)
+plot_consensus_support(sim)
 ```
 
-### `plot_ps_summary()` — all five panels combined
+### Combined summary — all five panels at once
 
-When you want a quick overview, `plot_ps_summary()` assembles all five plots
-into a single figure using **cowplot**.
+`plot_ps_summary()` assembles all five plots into a single figure using
+**cowplot**.
 
-```{r summary, fig.height=6}
-plot_ps_summary(sim, i = 1, title = "Single replicate summary")
+```{r summary, fig.height=10}
+plot_ps_summary(sim, title = "Single replicate summary")
 ```
 
 ---
 
 ## Sharing pre-computed counts across plots
 
-`plot_mutation_load()` and `plot_consensus_support()` both require computing
-the per-position counts with `counts_long_nogap()`. If you call both
-functions, you can compute the counts once and pass them to each:
+`plot_mutation_load()` and `plot_consensus_support()` both compute per-position
+counts internally. If you call both, compute once and pass:
 
 ```{r counts_reuse}
-mono   <- sim$monomers_list[[1]]
-counts <- counts_long_nogap(mono$bponly)
+counts <- counts_long_nogap(sim$monomers$bponly)
 
-p_ml <- plot_mutation_load(sim, i = 1, counts = counts)
-p_cs <- plot_consensus_support(sim, i = 1, counts = counts)
+p_ml <- plot_mutation_load(sim, counts = counts)
+p_cs <- plot_consensus_support(sim, counts = counts)
 ```
 
 ---
 
 ## Comparing parameter settings
 
-A common use-case is running several replicates under different mutation rates
-or duplication probabilities and comparing the resulting entropy:
+A common use-case is running several simulations under different parameters and
+comparing the resulting entropy:
 
 ```{r compare, eval=FALSE}
-sim_low  <- run_sim_ps(n = 3, max_units = 300, mu_total = 1e-5)
-sim_high <- run_sim_ps(n = 3, max_units = 300, mu_total = 1e-4)
+sims <- lapply(c(1e-5, 1e-4), function(mu) {
+  run_sim_ps(max_units = 300, mu_total = mu)
+})
 
-ent_low  <- get_sim_entropies(sim_low)
-ent_high <- get_sim_entropies(sim_high)
+ent <- rbindlist(lapply(seq_along(sims), function(i) {
+  e <- get_sim_entropies(sims[[i]])
+  e$mu <- c("low", "high")[i]
+  e
+}))
 
-ent_low$mu  <- "low"
-ent_high$mu <- "high"
-
-library(data.table)
-ent_all <- rbind(ent_low, ent_high)
-
-ggplot(ent_all, aes(x = mu, y = H)) +
-  geom_jitter(width = 0.1) +
+ggplot(ent, aes(x = mu, y = H)) +
+  geom_point(size = 3) +
   theme_classic() +
   ylab("Shannon entropy (bits)")
 ```
@@ -277,14 +242,14 @@ ggplot(ent_all, aes(x = mu, y = H)) +
 
 | Function | Purpose |
 |---|---|
-| `run_sim_ps()` | Run `n` replicates of repeat-array evolution |
+| `run_sim_ps()` | Run a single repeat-array evolution simulation |
 | `init_array()` | Initialise an array (used internally by `run_sim_ps`) |
 | `pairs_identical()` | Find all pairs of identical monomers |
 | `counts_long_nogap()` | Per-position base counts across aligned monomers |
 | `mu_load_from_consensus()` | Mismatch count per monomer vs consensus |
 | `shannon_entropy()` | Entropy (bits) of a monomer distribution |
 | `shannon_entropyplus()` | Entropy plus diversity statistics |
-| `get_sim_entropies()` | Entropy summary across all replicates |
+| `get_sim_entropies()` | Entropy summary for a simulation result |
 | `kb_row_window_entropy()` | Sliding-window entropy along an array |
 | `plot_repeat_fingerprint()` | Dot-plot of identical pairs |
 | `plot_pair_distances()` | Distance distribution between identical pairs |

@@ -4,16 +4,17 @@
 \alias{plot_copy_numbers}
 \title{Plot copy-number distribution of unique monomers}
 \usage{
-plot_copy_numbers(ps_results, i, bins = 50, base_size = 6)
+plot_copy_numbers(sim, bins = 80, base_size = 11, fill = "darkorange")
 }
 \arguments{
-\item{ps_results}{Output from \code{\link{run_sim_ps}}.}
+\item{sim}{Output from \code{\link{run_sim_ps}}.}
 
-\item{i}{Integer. Replicate index to plot.}
+\item{bins}{Integer. Number of histogram bins. Default 80.}
 
-\item{bins}{Integer. Number of histogram bins. Default 50.}
+\item{base_size}{Numeric. Base font size. Default 11.}
 
-\item{base_size}{Numeric. Base font size. Default 6.}
+\item{fill}{Character. Fill colour for histogram bars.
+Default \code{"darkorange"}.}
 }
 \value{
 A \code{ggplot2} object.
@@ -27,7 +28,7 @@ concerted evolution.
 }
 \examples{
 \dontrun{
-sim <- run_sim_ps(n = 1, max_t = 500, mu_total = 3e-5)
-plot_copy_numbers(sim, i = 1)
+sim <- run_sim_ps(max_t = 500, mu_total = 3e-5)
+plot_copy_numbers(sim)
 }
 }

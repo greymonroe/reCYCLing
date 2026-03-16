@@ -5,7 +5,6 @@
 \title{Run tandem repeat array evolution simulations}
 \usage{
 run_sim_ps(
-  n = 1000,
   max_units = 20000,
   max_t = Inf,
   hard_cap = 40000,
@@ -24,13 +23,13 @@ run_sim_ps(
   p_sub = 1,
   p_ins = 0,
   p_del_bp = 0,
-  verbose = FALSE
+  verbose = FALSE,
+  backend = c("auto", "cpp", "r"),
+  compute_pairs = TRUE
 )
 }
 \arguments{
-\item{n}{Integer. Number of independent simulation replicates. Default 1000.}
-
-\item{max_units}{Integer. Stop a replicate when the array reaches this many
+\item{max_units}{Integer. Stop when the array reaches this many
 units. Default 20000.}
 
 \item{max_t}{Numeric. Maximum number of generations per replicate.
@@ -82,31 +81,46 @@ Default 1.}
 
 \item{verbose}{Logical. Print progress messages each generation. Default
 \code{FALSE}.}
+
+\item{backend}{Character. Simulation backend to use: \code{"auto"} (default)
+selects the C++ backend for substitution-only simulations and falls back to
+R for indels; \code{"cpp"} forces the C++ backend (errors if indels are
+requested); \code{"r"} forces the pure-R backend. The C++ backend uses
+deferred mutations and integer encoding for ~100x speedup, but does not
+compute per-generation \code{H_vec} or \code{N_vec} (only the final
+values are available).}
+
+\item{compute_pairs}{Logical. If \code{TRUE} (default), compute all pairs
+of identical monomers via \code{\link{pairs_identical}} and return them
+in \code{ps}. Set to \code{FALSE} to skip this step and return an empty
+\code{data.table} for \code{ps}, which avoids the O(n^2) memory and time
+cost for large arrays. Plot functions that need pairs will compute them
+on the fly when passed a simulation with empty \code{ps}.}
 }
 \value{
-A named list with five elements, each a list of length \code{n}
-  (one entry per replicate):
+A named list with five elements:
   \describe{
-    \item{\code{monomers_list}}{Each element is a \code{data.table}
-      describing the final array. Columns: \code{num} (position index),
-      \code{bponly} (monomer sequence), \code{pos}, \code{chrom},
-      \code{hap}, \code{sample}, \code{dir}.}
-    \item{\code{ps_list}}{Each element is a \code{data.table} of all pairs
-      of identical monomers (output of \code{\link{pairs_identical}}).}
-    \item{\code{L_vec_list}}{Each element is a numeric vector of array
-      copy-number (length) sampled each generation.}
-    \item{\code{H_vec_list}}{Each element is a numeric vector of Shannon
-      entropy sampled each generation.}
-    \item{\code{N_vec_list}}{Each element is a numeric vector of unique
-      monomer count sampled each generation.}
+    \item{\code{monomers}}{A \code{data.table} describing the final array.
+      Columns: \code{num} (position index), \code{bponly} (monomer
+      sequence), \code{pos}, \code{chrom}, \code{hap}, \code{sample},
+      \code{dir}.}
+    \item{\code{ps}}{A \code{data.table} of all pairs of identical monomers
+      (output of \code{\link{pairs_identical}}).}
+    \item{\code{L_vec}}{Numeric vector of array copy-number (length)
+      sampled each generation.}
+    \item{\code{H_vec}}{Numeric vector of Shannon entropy sampled each
+      generation (final value only with C++ backend).}
+    \item{\code{N_vec}}{Numeric vector of unique monomer count sampled each
+      generation (final value only with C++ backend).}
   }
 }
 \description{
-Runs \code{n} independent replicates of tandem repeat array evolution.
-Each replicate starts from an array of \code{init_k0} identical monomers
-and advances through generations by applying local duplication, distal
-duplication, chunk deletion, and per-base mutation until an array-size
-or time cap is reached.
+Runs a single simulation of tandem repeat array evolution.
+Starts from an array of \code{init_k0} identical monomers and advances
+through generations by applying local duplication, distal duplication,
+chunk deletion, and per-base mutation until an array-size or time cap is
+reached. For multiple replicates, call this function in a loop or with
+\code{lapply}.
 }
 \section{Chunk-size distribution specs}{
 
@@ -127,14 +141,13 @@ maximum feasible size from the sampled start position.
 
 \examples{
 \dontrun{
-# Quick single replicate
-sim <- run_sim_ps(n = 1, init_l = 30, init_k0 = 10,
+sim <- run_sim_ps(init_l = 30, init_k0 = 10,
                   max_t = 500, mu_total = 3e-5)
 
-# Inspect the monomer table for replicate 1
-head(sim$monomers_list[[1]])
+# Inspect the monomer table
+head(sim$monomers)
 
 # Plot a summary
-plot_ps_summary(sim, i = 1)
+plot_ps_summary(sim)
 }
 }

@@ -6,27 +6,37 @@
 #' distance 1 indicates predominantly local (tandem) duplications, while a
 #' broad or bimodal distribution suggests distal duplications as well.
 #'
-#' @param ps_results Output from \code{\link{run_sim_ps}}.
-#' @param i Integer. Replicate index to plot.
-#' @param bins Integer. Number of histogram bins. Default 50.
+#' @param sim Output from \code{\link{run_sim_ps}}.
+#' @param bins Integer. Number of histogram bins. Default 80.
 #' @param base_size Numeric. Base font size passed to
-#'   \code{theme_classic}. Default 6.
+#'   \code{theme_classic}. Default 11.
+#' @param fill Character. Fill colour for histogram bars.
+#'   Default \code{"steelblue"}.
 #'
 #' @return A \code{ggplot2} object.
 #' @export
 #'
 #' @examples
 #' \dontrun{
-#' sim <- run_sim_ps(n = 1, max_t = 500, mu_total = 3e-5)
-#' plot_pair_distances(sim, i = 1)
+#' sim <- run_sim_ps(max_t = 500, mu_total = 3e-5)
+#' plot_pair_distances(sim)
 #' }
-plot_pair_distances <- function(ps_results, i, bins = 50, base_size = 6) {
-  ps <- as.data.table(ps_results$ps_list[[i]])
+plot_pair_distances <- function(sim, bins = 80, base_size = 11,
+                                fill = "steelblue") {
+  ps <- as.data.table(sim$ps)
+  # Compute pairs on the fly if sim was run with compute_pairs = FALSE
+  if (nrow(ps) == 0 && nrow(as.data.table(sim$monomers)) > 1)
+    ps <- pairs_identical(as.data.table(sim$monomers))
+  ps[, dist := abs(num1 - num2)]
+  ps <- ps[dist > 0]
 
-  ggplot(ps, aes(x = abs(num1 - num2))) +
-    geom_histogram(bins = bins) +
+  ggplot(ps, aes(x = dist)) +
+    geom_histogram(aes(y = after_stat(density)), bins = bins,
+                   fill = fill, colour = "white", linewidth = 0.1,
+                   alpha = 0.7) +
+    geom_density(linewidth = 0.6, colour = "black") +
     scale_x_log10() +
     theme_classic(base_size = base_size) +
-    xlab("|distance between identical pairs|") +
-    ylab("Count")
+    xlab("Distance between identical pairs") +
+    ylab("Density")
 }

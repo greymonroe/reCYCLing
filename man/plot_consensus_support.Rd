@@ -4,22 +4,28 @@
 \alias{plot_consensus_support}
 \title{Plot per-position consensus support across the array}
 \usage{
-plot_consensus_support(ps_results, i, counts = NULL, bins = 50, base_size = 6)
+plot_consensus_support(
+  sim,
+  counts = NULL,
+  bins = 80,
+  base_size = 11,
+  fill = "seagreen"
+)
 }
 \arguments{
-\item{ps_results}{Output from \code{\link{run_sim_ps}}.}
-
-\item{i}{Integer. Replicate index to plot.}
+\item{sim}{Output from \code{\link{run_sim_ps}}.}
 
 \item{counts}{Optional. Pre-computed output from
-\code{\link{counts_long_nogap}} for this replicate. If \code{NULL}
-(default), it is computed internally. Pass a pre-computed value when
-calling multiple plot functions on the same replicate to avoid redundant
-computation.}
+\code{\link{counts_long_nogap}}. If \code{NULL} (default), it is computed
+internally. Pass a pre-computed value when calling multiple plot functions
+to avoid redundant computation.}
 
-\item{bins}{Integer. Number of histogram bins. Default 50.}
+\item{bins}{Integer. Number of histogram bins. Default 80.}
 
-\item{base_size}{Numeric. Base font size. Default 6.}
+\item{base_size}{Numeric. Base font size. Default 11.}
+
+\item{fill}{Character. Fill colour for histogram bars.
+Default \code{"seagreen"}.}
 }
 \value{
 A \code{ggplot2} object.
@@ -33,7 +39,7 @@ co-existing sequence variants, or both.
 }
 \examples{
 \dontrun{
-sim <- run_sim_ps(n = 1, max_t = 500, mu_total = 3e-5)
-plot_consensus_support(sim, i = 1)
+sim <- run_sim_ps(max_t = 500, mu_total = 3e-5)
+plot_consensus_support(sim)
 }
 }

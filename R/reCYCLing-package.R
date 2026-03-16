@@ -23,7 +23,10 @@
 #'
 #' @import data.table
 #' @import ggplot2
+#' @importFrom parallel mclapply
+#' @importFrom Rcpp sourceCpp
 #' @importFrom stats rgamma rgeom rnorm rpois runif
+#' @useDynLib reCYCLing, .registration = TRUE
 "_PACKAGE"
 
 # Suppress R CMD check NOTEs for data.table column-name variables used

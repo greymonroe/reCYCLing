@@ -15,12 +15,15 @@ Imports:
     data.table,
     ggplot2,
     grid,
+    parallel,
     pbapply,
+    Rcpp,
     scales,
-    stats,
-    utils
+    stats
+LinkingTo: Rcpp
 Suggests:
     knitr,
-    rmarkdown
+    rmarkdown,
+    shiny
 VignetteBuilder: knitr
 RoxygenNote: 7.3.3

@@ -4,13 +4,20 @@
 \alias{pairs_identical}
 \title{Find all pairs of identical repeat units}
 \usage{
-pairs_identical(repeats)
+pairs_identical(repeats, max_group_size = Inf)
 }
 \arguments{
 \item{repeats}{A \code{data.table} (or coercible object) with at least the
 columns \code{bponly}, \code{num}, \code{pos}, \code{chrom}, \code{hap},
 \code{sample}, and \code{dir}. Typically an element of
 \code{ps_results$monomers_list}.}
+
+\item{max_group_size}{Integer. Maximum number of identical monomers in a
+single group before pairs are sampled instead of fully enumerated. Groups
+larger than this threshold contribute at most
+\code{max_group_size * (max_group_size - 1) / 2} pairs via random
+sampling. Default \code{Inf} (enumerate all pairs). Set to e.g. 500 to
+avoid memory issues with very large homogeneous arrays.}
 }
 \value{
 A \code{data.table} with one row per identical pair. Columns are

@@ -3,6 +3,18 @@
 # ============================================================
 # These functions are not exported; they are called by run_sim_ps().
 
+# Validate that a value is a probability in [0, 1].
+.check_prob <- function(x, name) {
+  if (!is.numeric(x) || length(x) != 1L || x < 0 || x > 1)
+    stop(name, " must be a single numeric value in [0, 1]")
+}
+
+# Validate that a value is a positive integer.
+.check_pos_int <- function(x, name) {
+  if (!is.numeric(x) || length(x) != 1L || x < 1 || x != round(x))
+    stop(name, " must be a positive integer")
+}
+
 # Sample a chunk size from a distribution specification list.
 # dist$type must be one of: "fixed", "poisson", "normal", "geom", "unif", "gamma".
 .sample_chunk_size <- function(dist, max_k) {
@@ -34,13 +46,13 @@
 }
 
 # Apply local (tandem) duplications to the array.
-.local_duplication <- function(units, p_local_dup, chunk_size_dist) {
+.local_duplication <- function(units, dirs, p_local_dup, chunk_size_dist) {
   k <- length(units)
-  if (k == 0) return(units)
+  if (k == 0) return(list(units = units, dirs = dirs))
 
   triggers <- runif(k) < p_local_dup
   idxs     <- which(triggers)
-  if (length(idxs) == 0L) return(units)
+  if (length(idxs) == 0L) return(list(units = units, dirs = dirs))
 
   for (i in rev(idxs)) {
     current_k <- length(units)
@@ -51,22 +63,25 @@
     start <- i
     end   <- start + chunk_size - 1L
     chunk <- units[start:end]
-    tail  <- if (end < current_k) units[(end + 1L):current_k] else character(0)
+    chunk_dirs <- dirs[start:end]
+    tail_units <- if (end < current_k) units[(end + 1L):current_k] else character(0)
+    tail_dirs  <- if (end < current_k) dirs[(end + 1L):current_k] else character(0)
 
-    units <- c(units[1:end], chunk, tail)
+    units <- c(units[1:end], chunk, tail_units)
+    dirs  <- c(dirs[1:end], chunk_dirs, tail_dirs)
   }
-  units
+  list(units = units, dirs = dirs)
 }
 
 # Apply distal (copy-paste elsewhere) duplications.
-.distal_duplication <- function(units, p_distal_dup, chunk_size_dist,
+.distal_duplication <- function(units, dirs, p_distal_dup, chunk_size_dist,
                                 p_invert_distal = 0.5) {
   k <- length(units)
-  if (k == 0) return(units)
+  if (k == 0) return(list(units = units, dirs = dirs))
 
   triggers <- runif(k) < p_distal_dup
   idxs     <- which(triggers)
-  if (length(idxs) == 0L) return(units)
+  if (length(idxs) == 0L) return(list(units = units, dirs = dirs))
 
   for (i in rev(idxs)) {
     current_k <- length(units)
@@ -78,29 +93,42 @@
     start        <- i
     end          <- min(start + chunk_size - 1L, current_k)
     chunk        <- units[start:end]
+    chunk_dirs   <- dirs[start:end]
 
-    if (runif(1) < p_invert_distal) chunk <- rev(chunk)
+    inverted <- runif(1) < p_invert_distal
+    if (inverted) {
+      chunk      <- rev(chunk)
+      chunk_dirs <- ifelse(rev(chunk_dirs) == "+", "-", "+")
+    }
 
-    insert_after <- sample(end:current_k, 1L)
+    # Insert anywhere in the array (not just downstream of the source)
+    n_positions <- current_k + 1L
+    insert_after <- sample.int(n_positions, 1L) - 1L  # 0 = before position 1
 
-    if (insert_after == current_k) {
+    if (insert_after == 0L) {
+      units <- c(chunk, units)
+      dirs  <- c(chunk_dirs, dirs)
+    } else if (insert_after == current_k) {
       units <- c(units, chunk)
+      dirs  <- c(dirs, chunk_dirs)
     } else {
       units <- c(units[1:insert_after], chunk,
                  units[(insert_after + 1L):current_k])
+      dirs  <- c(dirs[1:insert_after], chunk_dirs,
+                 dirs[(insert_after + 1L):current_k])
     }
   }
-  units
+  list(units = units, dirs = dirs)
 }
 
 # Apply chunk deletions.
-.delete_chunk <- function(units, p_del_chunk, del_chunk_size_dist) {
+.delete_chunk <- function(units, dirs, p_del_chunk, del_chunk_size_dist) {
   k <- length(units)
-  if (k == 0) return(units)
+  if (k == 0) return(list(units = units, dirs = dirs))
 
   triggers <- runif(k) < p_del_chunk
   idxs     <- which(triggers)
-  if (length(idxs) == 0L) return(units)
+  if (length(idxs) == 0L) return(list(units = units, dirs = dirs))
 
   for (i in rev(idxs)) {
     current_k <- length(units)
@@ -114,15 +142,19 @@
 
     if (start == 1L && end == current_k) {
       units <- character(0)
+      dirs  <- character(0)
     } else if (start == 1L) {
       units <- units[(end + 1L):current_k]
+      dirs  <- dirs[(end + 1L):current_k]
     } else if (end == current_k) {
       units <- units[1:(start - 1L)]
+      dirs  <- dirs[1:(start - 1L)]
     } else {
       units <- c(units[1:(start - 1L)], units[(end + 1L):current_k])
+      dirs  <- c(dirs[1:(start - 1L)], dirs[(end + 1L):current_k])
     }
   }
-  units
+  list(units = units, dirs = dirs)
 }
 
 # Apply per-base substitution / insertion / deletion mutations.
@@ -139,22 +171,25 @@
   mutate_one_unit <- function(unit) {
     bases       <- strsplit(unit, "")[[1]]
     L           <- length(bases)
+    if (L == 0L) return(unit)
     mutate_mask <- runif(L) < mu_total
     if (!any(mutate_mask)) return(unit)
 
-    i <- 1L
-    while (i <= length(bases)) {
-      if (!mutate_mask[i]) { i <- i + 1L; next }
+    # Collect positions to mutate (original positions only)
+    mut_positions <- which(mutate_mask)
+
+    # Process in reverse to avoid index shifting issues
+    for (j in rev(mut_positions)) {
+      if (j > length(bases)) next
       mut_type <- sample(c("sub", "ins", "del"), size = 1, prob = probs)
       if (mut_type == "sub") {
-        bases[i] <- sample(setdiff(alphabet, bases[i]), 1)
-        i <- i + 1L
+        bases[j] <- sample(setdiff(alphabet, bases[j]), 1)
       } else if (mut_type == "ins") {
-        bases        <- append(bases, sample(alphabet, 1), after = i)
-        i <- i + 2L
+        bases <- append(bases, sample(alphabet, 1), after = j)
       } else {
-        bases        <- bases[-i]
-        mutate_mask  <- mutate_mask[-i]
+        if (length(bases) > 1L) {
+          bases <- bases[-j]
+        }
       }
     }
     paste0(bases, collapse = "")
@@ -164,7 +199,7 @@
 }
 
 # Advance the array by one generation.
-.step_generation <- function(units,
+.step_generation <- function(units, dirs,
                              p_local_dup, local_chunk_size_dist,
                              p_distal_dup, distal_chunk_size_dist,
                              p_invert_distal = 0.5,
@@ -173,16 +208,16 @@
                              p_sub = 1, p_ins = 0, p_del_bp = 0,
                              alphabet = c("A", "C", "G", "T")) {
 
-  units <- .local_duplication(units, p_local_dup, local_chunk_size_dist)
-  units <- .distal_duplication(units, p_distal_dup, distal_chunk_size_dist,
-                               p_invert_distal)
-  units <- .delete_chunk(units, p_del_chunk, del_chunk_size_dist)
-  units <- .mutate_units(units, mu_total, p_sub, p_ins, p_del_bp, alphabet)
-  units
+  res <- .local_duplication(units, dirs, p_local_dup, local_chunk_size_dist)
+  res <- .distal_duplication(res$units, res$dirs, p_distal_dup,
+                             distal_chunk_size_dist, p_invert_distal)
+  res <- .delete_chunk(res$units, res$dirs, p_del_chunk, del_chunk_size_dist)
+  units <- .mutate_units(res$units, mu_total, p_sub, p_ins, p_del_bp, alphabet)
+  list(units = units, dirs = res$dirs)
 }
 
 # Convert a units vector to a monomer data.table.
-.make_unit_dt <- function(units, hap = 1, chrom = 1, sample = "sim") {
+.make_unit_dt <- function(units, dirs, hap = 1, chrom = 1, sample = "sim") {
   data.table(
     num    = seq_along(units),
     bponly = units,
@@ -190,8 +225,176 @@
     chrom  = chrom,
     hap    = hap,
     sample = sample,
-    dir    = "-"
+    dir    = dirs
   )
+}
+
+# Run a single replicate (used internally by run_sim_ps).
+.run_one_replicate <- function(rep_i, init_l, init_k0, init_sequence_type,
+                               ancestor_seq, max_units, max_t, hard_cap,
+                               p_local_dup, local_dist,
+                               p_distal_dup, distal_dist, p_invert_distal,
+                               p_del_chunk, del_dist,
+                               mu_total, p_sub, p_ins, p_del_bp,
+                               verbose, compute_pairs = TRUE) {
+  units <- init_array(l = init_l, k0 = init_k0,
+                      init_sequence_type = init_sequence_type,
+                      ancestor_seq = ancestor_seq)
+  dirs <- rep("+", length(units))
+
+  # Pre-allocate trajectory storage with a reasonable initial capacity
+  capacity <- 1024L
+  l_vec <- numeric(capacity)
+  H_vec <- numeric(capacity)
+  N_vec <- numeric(capacity)
+  idx   <- 1L
+
+  l_vec[idx] <- length(units)
+  H_vec[idx] <- shannon_entropy(units)
+  N_vec[idx] <- uniqueN(units)
+
+  t <- 1L
+
+  while (length(units) < max_units && t < max_t) {
+    t <- t + 1L
+    if (verbose)
+      cat("  Rep", rep_i, "- Gen", t, "- units:", length(units), "\n")
+
+    if (length(units) > hard_cap) {
+      warning("Replicate ", rep_i, " exceeded hard_cap (", hard_cap,
+              ") at generation ", t, " with ", length(units), " units",
+              call. = FALSE)
+      break
+    }
+
+    if (length(units) == 0L) {
+      warning("Replicate ", rep_i, " array went extinct at generation ", t,
+              "; re-initializing", call. = FALSE)
+      units <- init_array(l = init_l, k0 = init_k0,
+                          init_sequence_type = init_sequence_type,
+                          ancestor_seq = ancestor_seq)
+      dirs <- rep("+", length(units))
+    }
+
+    res <- .step_generation(
+      units, dirs,
+      p_local_dup           = p_local_dup,
+      local_chunk_size_dist = local_dist,
+      p_distal_dup          = p_distal_dup,
+      distal_chunk_size_dist = distal_dist,
+      p_invert_distal       = p_invert_distal,
+      p_del_chunk           = p_del_chunk,
+      del_chunk_size_dist   = del_dist,
+      mu_total              = mu_total,
+      p_sub                 = p_sub,
+      p_ins                 = p_ins,
+      p_del_bp              = p_del_bp
+    )
+    units <- res$units
+    dirs  <- res$dirs
+
+    idx <- idx + 1L
+    if (idx > capacity) {
+      capacity <- capacity * 2L
+      length(l_vec) <- capacity
+      length(H_vec) <- capacity
+      length(N_vec) <- capacity
+    }
+    l_vec[idx] <- length(units)
+    H_vec[idx] <- shannon_entropy(units)
+    N_vec[idx] <- uniqueN(units)
+  }
+
+  # Trim to actual length
+  l_vec <- l_vec[seq_len(idx)]
+  H_vec <- H_vec[seq_len(idx)]
+  N_vec <- N_vec[seq_len(idx)]
+
+  dt_units <- .make_unit_dt(units, dirs)
+  ps       <- if (compute_pairs) pairs_identical(dt_units) else data.table()
+
+  list(monomers = dt_units, ps = ps,
+       L_vec = l_vec, H_vec = H_vec, N_vec = N_vec)
+}
+
+# Run a single replicate using the C++ backend (deferred mutations).
+.run_one_replicate_cpp <- function(rep_i, init_l, init_k0, init_sequence_type,
+                                   ancestor_seq, max_units, max_t, hard_cap,
+                                   p_local_dup, local_dist,
+                                   p_distal_dup, distal_dist, p_invert_distal,
+                                   p_del_chunk, del_dist,
+                                   mu_total, verbose, compute_pairs = TRUE) {
+  # Generate ancestor sequence
+  units <- init_array(l = init_l, k0 = 1L,
+                      init_sequence_type = init_sequence_type,
+                      ancestor_seq = ancestor_seq)
+
+  # Convert ancestor to integer vector (1=A, 2=C, 3=G, 4=T)
+  base_map <- c(A = 1L, C = 2L, G = 3L, T = 4L)
+  ancestor_int <- base_map[strsplit(units[1], "")[[1]]]
+
+  # Cap max_t for C++ (no Inf allowed)
+  max_t_int <- if (is.infinite(max_t)) .Machine$integer.max else as.integer(max_t)
+
+  # Call C++ engine
+  res <- sim_core_cpp(
+    ancestor_seq_r   = ancestor_int,
+    init_k0          = as.integer(init_k0),
+    max_units        = as.integer(max_units),
+    max_t            = max_t_int,
+    hard_cap         = as.integer(hard_cap),
+    p_local_dup      = p_local_dup,
+    local_dist       = local_dist,
+    p_distal_dup     = p_distal_dup,
+    distal_dist      = distal_dist,
+    p_invert_distal  = p_invert_distal,
+    p_del_chunk      = p_del_chunk,
+    del_dist         = del_dist,
+    mu_total         = mu_total,
+    verbose          = verbose
+  )
+
+  if (res$hit_hard_cap) {
+    warning("Replicate ", rep_i, " exceeded hard_cap (", hard_cap, ")",
+            call. = FALSE)
+  }
+
+  seqs <- res$seqs
+  dirs <- res$dirs
+  n_final <- length(seqs)
+
+  if (n_final == 0L) {
+    warning("Replicate ", rep_i, " array went extinct", call. = FALSE)
+    seqs <- init_array(l = init_l, k0 = init_k0,
+                       init_sequence_type = init_sequence_type,
+                       ancestor_seq = ancestor_seq)
+    dirs <- rep("+", length(seqs))
+    n_final <- length(seqs)
+  }
+
+  dt_units <- data.table(
+    num    = seq_len(n_final),
+    bponly = seqs,
+    pos    = 1L,
+    chrom  = 1L,
+    hap    = 1L,
+    sample = "sim",
+    dir    = dirs
+  )
+
+  ps <- if (compute_pairs) pairs_identical(dt_units) else data.table()
+
+  # L_vec from C++; H_vec and N_vec computed only for the final state
+  l_vec <- as.numeric(res$l_vec)
+  H_final <- shannon_entropy(seqs)
+  N_final <- uniqueN(seqs)
+  H_vec <- rep(NA_real_, length(l_vec))
+  N_vec <- rep(NA_real_, length(l_vec))
+  H_vec[length(H_vec)] <- H_final
+  N_vec[length(N_vec)] <- N_final
+
+  list(monomers = dt_units, ps = ps,
+       L_vec = l_vec, H_vec = H_vec, N_vec = N_vec)
 }
 
 # ============================================================
@@ -200,11 +403,12 @@
 
 #' Run tandem repeat array evolution simulations
 #'
-#' Runs \code{n} independent replicates of tandem repeat array evolution.
-#' Each replicate starts from an array of \code{init_k0} identical monomers
-#' and advances through generations by applying local duplication, distal
-#' duplication, chunk deletion, and per-base mutation until an array-size
-#' or time cap is reached.
+#' Runs a single simulation of tandem repeat array evolution.
+#' Starts from an array of \code{init_k0} identical monomers and advances
+#' through generations by applying local duplication, distal duplication,
+#' chunk deletion, and per-base mutation until an array-size or time cap is
+#' reached. For multiple replicates, call this function in a loop or with
+#' \code{lapply}.
 #'
 #' @section Chunk-size distribution specs:
 #' \code{local_dist}, \code{distal_dist}, and \code{del_dist} are lists with
@@ -221,8 +425,7 @@
 #' Chunk sizes are coerced to an integer \eqn{\geq 1} and clipped to the
 #' maximum feasible size from the sampled start position.
 #'
-#' @param n Integer. Number of independent simulation replicates. Default 1000.
-#' @param max_units Integer. Stop a replicate when the array reaches this many
+#' @param max_units Integer. Stop when the array reaches this many
 #'   units. Default 20000.
 #' @param max_t Numeric. Maximum number of generations per replicate.
 #'   Default \code{Inf} (no time cap).
@@ -256,39 +459,49 @@
 #' @param p_del_bp Numeric. Relative probability of a base deletion. Default 0.
 #' @param verbose Logical. Print progress messages each generation. Default
 #'   \code{FALSE}.
+#' @param compute_pairs Logical. If \code{TRUE} (default), compute all pairs
+#'   of identical monomers via \code{\link{pairs_identical}} and return them
+#'   in \code{ps}. Set to \code{FALSE} to skip this step and return an empty
+#'   \code{data.table} for \code{ps}, which avoids the O(n^2) memory and time
+#'   cost for large arrays. Plot functions that need pairs will compute them
+#'   on the fly when passed a simulation with empty \code{ps}.
+#' @param backend Character. Simulation backend to use: \code{"auto"} (default)
+#'   selects the C++ backend for substitution-only simulations and falls back to
+#'   R for indels; \code{"cpp"} forces the C++ backend (errors if indels are
+#'   requested); \code{"r"} forces the pure-R backend. The C++ backend uses
+#'   deferred mutations and integer encoding for ~100x speedup, but does not
+#'   compute per-generation \code{H_vec} or \code{N_vec} (only the final
+#'   values are available).
 #'
-#' @return A named list with five elements, each a list of length \code{n}
-#'   (one entry per replicate):
+#' @return A named list with five elements:
 #'   \describe{
-#'     \item{\code{monomers_list}}{Each element is a \code{data.table}
-#'       describing the final array. Columns: \code{num} (position index),
-#'       \code{bponly} (monomer sequence), \code{pos}, \code{chrom},
-#'       \code{hap}, \code{sample}, \code{dir}.}
-#'     \item{\code{ps_list}}{Each element is a \code{data.table} of all pairs
-#'       of identical monomers (output of \code{\link{pairs_identical}}).}
-#'     \item{\code{L_vec_list}}{Each element is a numeric vector of array
-#'       copy-number (length) sampled each generation.}
-#'     \item{\code{H_vec_list}}{Each element is a numeric vector of Shannon
-#'       entropy sampled each generation.}
-#'     \item{\code{N_vec_list}}{Each element is a numeric vector of unique
-#'       monomer count sampled each generation.}
+#'     \item{\code{monomers}}{A \code{data.table} describing the final array.
+#'       Columns: \code{num} (position index), \code{bponly} (monomer
+#'       sequence), \code{pos}, \code{chrom}, \code{hap}, \code{sample},
+#'       \code{dir}.}
+#'     \item{\code{ps}}{A \code{data.table} of all pairs of identical monomers
+#'       (output of \code{\link{pairs_identical}}).}
+#'     \item{\code{L_vec}}{Numeric vector of array copy-number (length)
+#'       sampled each generation.}
+#'     \item{\code{H_vec}}{Numeric vector of Shannon entropy sampled each
+#'       generation (final value only with C++ backend).}
+#'     \item{\code{N_vec}}{Numeric vector of unique monomer count sampled each
+#'       generation (final value only with C++ backend).}
 #'   }
 #' @export
 #'
 #' @examples
 #' \dontrun{
-#' # Quick single replicate
-#' sim <- run_sim_ps(n = 1, init_l = 30, init_k0 = 10,
+#' sim <- run_sim_ps(init_l = 30, init_k0 = 10,
 #'                   max_t = 500, mu_total = 3e-5)
 #'
-#' # Inspect the monomer table for replicate 1
-#' head(sim$monomers_list[[1]])
+#' # Inspect the monomer table
+#' head(sim$monomers)
 #'
 #' # Plot a summary
-#' plot_ps_summary(sim, i = 1)
+#' plot_ps_summary(sim)
 #' }
 run_sim_ps <- function(
-    n = 1000,
     max_units = 20000,
     max_t     = Inf,
     hard_cap  = 40000,
@@ -307,68 +520,66 @@ run_sim_ps <- function(
     p_sub                = 1,
     p_ins                = 0,
     p_del_bp             = 0,
-    verbose = FALSE
+    verbose = FALSE,
+    backend = c("auto", "cpp", "r"),
+    compute_pairs = TRUE
 ) {
-  ps_list       <- vector("list", n)
-  monomers_list <- vector("list", n)
-  L_vec_list    <- vector("list", n)
-  H_vec_list    <- vector("list", n)
-  N_vec_list    <- vector("list", n)
+  backend <- match.arg(backend)
 
-  for (i in seq_len(n)) {
-    cat("Starting replicate", i, "\n")
+  # --- Input validation ---
+  .check_pos_int(max_units, "max_units")
+  if (!is.infinite(max_t)) .check_pos_int(max_t, "max_t")
+  .check_pos_int(hard_cap, "hard_cap")
+  .check_pos_int(init_l, "init_l")
+  .check_pos_int(init_k0, "init_k0")
+  .check_prob(p_local_dup, "p_local_dup")
+  .check_prob(p_distal_dup, "p_distal_dup")
+  .check_prob(p_invert_distal, "p_invert_distal")
+  .check_prob(p_del_chunk, "p_del_chunk")
+  .check_prob(mu_total, "mu_total")
+  if (hard_cap < max_units)
+    warning("hard_cap (", hard_cap, ") < max_units (", max_units,
+            "); simulations may never reach max_units", call. = FALSE)
 
-    units <- init_array(l = init_l, k0 = init_k0,
-                        init_sequence_type = init_sequence_type,
-                        ancestor_seq = ancestor_seq)
+  # Select backend
+  has_indels <- p_ins > 0 || p_del_bp > 0
+  use_cpp <- switch(backend,
+    auto = !has_indels,
+    cpp  = {
+      if (has_indels)
+        stop("C++ backend does not support indels (p_ins/p_del_bp > 0)")
+      TRUE
+    },
+    r    = FALSE
+  )
 
-    l_vec <- length(units)
-    t     <- 1L
-    H_vec <- numeric(0)
-    N_vec <- numeric(0)
-
-    while (length(units) < max_units && t < max_t) {
-      t <- t + 1L
-      if (verbose)
-        cat("  Rep", i, "- Gen", t, "- units:", length(units), "\n")
-      if (length(units) > hard_cap) break
-
-      if (length(units) == 0L)
-        units <- init_array(l = init_l, k0 = init_k0,
-                            init_sequence_type = init_sequence_type,
-                            ancestor_seq = ancestor_seq)
-
-      units <- .step_generation(
-        units,
-        p_local_dup           = p_local_dup,
-        local_chunk_size_dist = local_dist,
-        p_distal_dup          = p_distal_dup,
-        distal_chunk_size_dist = distal_dist,
-        p_invert_distal       = p_invert_distal,
-        p_del_chunk           = p_del_chunk,
-        del_chunk_size_dist   = del_dist,
-        mu_total              = mu_total,
-        p_sub                 = p_sub,
-        p_ins                 = p_ins,
-        p_del_bp              = p_del_bp
-      )
-
-      H_vec <- c(H_vec, shannon_entropy(units))
-      l_vec <- c(l_vec, length(units))
-      N_vec <- c(N_vec, uniqueN(units))
-    }
-
-    L_vec_list[[i]]    <- l_vec
-    N_vec_list[[i]]    <- N_vec
-    H_vec_list[[i]]    <- H_vec
-    dt_units           <- .make_unit_dt(units)
-    monomers_list[[i]] <- dt_units
-    ps_list[[i]]       <- pairs_identical(dt_units)
+  if (use_cpp) {
+    .run_one_replicate_cpp(
+      rep_i = 1L,
+      init_l = init_l, init_k0 = init_k0,
+      init_sequence_type = init_sequence_type,
+      ancestor_seq = ancestor_seq,
+      max_units = max_units, max_t = max_t, hard_cap = hard_cap,
+      p_local_dup = p_local_dup, local_dist = local_dist,
+      p_distal_dup = p_distal_dup, distal_dist = distal_dist,
+      p_invert_distal = p_invert_distal,
+      p_del_chunk = p_del_chunk, del_dist = del_dist,
+      mu_total = mu_total, verbose = verbose,
+      compute_pairs = compute_pairs
+    )
+  } else {
+    .run_one_replicate(
+      rep_i = 1L,
+      init_l = init_l, init_k0 = init_k0,
+      init_sequence_type = init_sequence_type,
+      ancestor_seq = ancestor_seq,
+      max_units = max_units, max_t = max_t, hard_cap = hard_cap,
+      p_local_dup = p_local_dup, local_dist = local_dist,
+      p_distal_dup = p_distal_dup, distal_dist = distal_dist,
+      p_invert_distal = p_invert_distal,
+      p_del_chunk = p_del_chunk, del_dist = del_dist,
+      mu_total = mu_total, p_sub = p_sub, p_ins = p_ins, p_del_bp = p_del_bp,
+      verbose = verbose, compute_pairs = compute_pairs
+    )
   }
-
-  list(monomers_list = monomers_list,
-       ps_list       = ps_list,
-       L_vec_list    = L_vec_list,
-       H_vec_list    = H_vec_list,
-       N_vec_list    = N_vec_list)
 }

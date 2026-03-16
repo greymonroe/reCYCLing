@@ -4,15 +4,18 @@
 \alias{mu_load_from_consensus}
 \title{Mutation load of each sequence relative to a consensus}
 \usage{
-mu_load_from_consensus(rawseqs, consensus)
+mu_load_from_consensus(rawseqs, consensus, gap_char = "-")
 }
 \arguments{
-\item{rawseqs}{Character vector of aligned sequences (all same length).}
+\item{rawseqs}{Character vector of sequences.}
 
 \item{consensus}{A \code{data.table} with columns \code{pos} and
 \code{consensus} (one row per alignment position), as returned by
 filtering \code{counts_long_nogap()} to rows where
 \code{symbol == consensus}.}
+
+\item{gap_char}{Character. The gap symbol used for padding. Default
+\code{"-"}.}
 }
 \value{
 An integer vector of the same length as \code{rawseqs}, giving the
@@ -22,6 +25,10 @@ An integer vector of the same length as \code{rawseqs}, giving the
 Counts the number of positions at which each sequence in \code{rawseqs}
 differs from the consensus sequence. This gives a simple per-monomer
 measure of divergence.
+}
+\details{
+When sequences have unequal lengths (e.g. after indel mutations), they are
+right-padded with the gap character before comparison.
 }
 \examples{
 \dontrun{

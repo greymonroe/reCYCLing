@@ -1,0 +1,2 @@
+CXX_STD = CXX17
+PKG_CXXFLAGS = -isystem /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include/c++/v1
