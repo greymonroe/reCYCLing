@@ -41,7 +41,6 @@ PARAMS <- list(
   list(name = "p_local_dup",  lo = -4,  hi = -2,   transform = function(x) 10^x),
   list(name = "p_distal_dup", lo = -6,  hi = -3,   transform = function(x) 10^x),
   list(name = "p_del_chunk",  lo = -6,  hi = -3,   transform = function(x) 10^x),
-  list(name = "mu_total",     lo = -5,  hi = -2,   transform = function(x) 10^x),
   list(name = "local_shape",  lo = 0.5, hi = 5,    transform = function(x) x),
   list(name = "local_scale",  lo = 1,   hi = 50,   transform = function(x) x),
   list(name = "distal_shape", lo = 0.5, hi = 5,    transform = function(x) x),
@@ -57,12 +56,12 @@ sample_prior_one <- function() {
   as.data.table(row)
 }
 
-params_to_args <- function(row) {
+params_to_args <- function(row, mu_total) {
   list(
     p_local_dup  = 10^row$p_local_dup,
     p_distal_dup = 10^row$p_distal_dup,
     p_del_chunk  = 10^row$p_del_chunk,
-    mu_total     = 10^row$mu_total,
+    mu_total     = mu_total,
     local_dist   = list(type = "gamma", shape = row$local_shape,
                         scale = row$local_scale),
     distal_dist  = list(type = "gamma", shape = row$distal_shape,
@@ -104,12 +103,12 @@ fit_2gauss <- function(x, max_iter = 100, max_n = 10000) {
 }
 
 run_and_summarize_one <- function(row, max_units, max_t, init_l, init_k0,
-                                  sim_timeout, target = NULL) {
-  sim_args <- params_to_args(row)
+                                  sim_timeout, target = NULL, mu_total = 1e-4) {
+  sim_args <- params_to_args(row, mu_total)
   t0 <- proc.time()[3]
 
   # Use a reduced hard_cap to prevent memory blowup in the Shiny context
-  hard_cap <- min(max_units * 2L, 20000L)
+  hard_cap <- min(max_units * 2L, 50000L)
 
   sim <- tryCatch(
     suppressWarnings(run_sim_ps(
@@ -128,7 +127,11 @@ run_and_summarize_one <- function(row, max_units, max_t, init_l, init_k0,
 
   if (is.null(sim)) return(list(stats = NULL, sim = NULL, elapsed = elapsed))
   mono <- sim$monomers
-  n_gens <- length(sim$L_vec)  # how many generations the sim actually ran
+  n_gens <- length(sim$L_vec)
+
+  # Reject absurdly large arrays (explosive dup rate blew past hard_cap in one step)
+  if (nrow(mono) > max_units * 3)
+    return(list(stats = NULL, sim = NULL, elapsed = elapsed))
 
   # --- Full summary statistics ---
   # Compute pairwise distances from sampled identical pairs directly,
@@ -147,7 +150,7 @@ run_and_summarize_one <- function(row, max_units, max_t, init_l, init_k0,
         list(d = abs(positions[id1] - positions[id2]))
       } else {
         # Large group: sample pairs
-        n_sample <- min(5000L, n * (n - 1L) %/% 2L)
+        n_sample <- min(5000L, as.numeric(n) * (n - 1L) %/% 2)
         s1 <- sample.int(n, n_sample, replace = TRUE)
         s2 <- sample.int(n, n_sample, replace = TRUE)
         keep <- s1 != s2
@@ -157,47 +160,53 @@ run_and_summarize_one <- function(row, max_units, max_t, init_l, init_k0,
   }, by = bponly]$d
   dists <- dists[dists > 0]
   if (length(dists) < 20) return(list(stats = NULL, sim = sim, elapsed = elapsed))
-  fit <- fit_2gauss(log10(dists))
-  if (is.null(fit)) return(list(stats = NULL, sim = sim, elapsed = elapsed))
+
+  # Quantile-based summary stats: robust, fast, no distribution assumptions.
+  # Split distances into near (<= threshold) and far (> threshold).
+  threshold <- if (!is.null(target)) target$near_far_threshold else 100
+  near <- dists[dists <= threshold]
+  far  <- dists[dists > threshold]
+  near_frac <- length(near) / length(dists)
+  med_near  <- if (length(near) >= 5) median(log10(near)) else NA_real_
+  med_far   <- if (length(far) >= 5) median(log10(far)) else NA_real_
+
+  # Require both components to have enough data
+  if (is.na(med_near) || is.na(med_far))
+    return(list(stats = NULL, sim = sim, elapsed = elapsed))
+
+  # Mutation load
   ct <- tryCatch(counts_long_nogap(mono$bponly), error = function(e) NULL)
   if (is.null(ct)) return(list(stats = NULL, sim = sim, elapsed = elapsed))
   cons <- ct[symbol == consensus][order(pos)]
   load <- mu_load_from_consensus(mono$bponly, cons)
-  stats <- data.table(log_mode1 = fit$log_mode1, log_mode2 = fit$log_mode2,
-                      weight1 = fit$weight1, mean_load = mean(load),
+
+  stats <- data.table(med_near = med_near, med_far = med_far,
+                      near_frac = near_frac, mean_load = mean(load),
                       n_units = nrow(mono), n_gens = n_gens)
   list(stats = stats, sim = sim, elapsed = elapsed)
 }
 
 compute_distance <- function(sim_stats, target, stat_scales = NULL) {
   diffs <- c(
-    log_mode1 = sim_stats$log_mode1 - target$log_mode1,
-    log_mode2 = sim_stats$log_mode2 - target$log_mode2,
-    weight1   = sim_stats$weight1   - target$weight1,
-    # Use relative error for mean_load so it's on a comparable scale to
-    # the log-space mode differences (both are dimensionless ratios)
+    med_near  = sim_stats$med_near  - target$med_near,
+    med_far   = sim_stats$med_far   - target$med_far,
+    near_frac = sim_stats$near_frac - target$near_frac,
     mean_load = (sim_stats$mean_load - target$mean_load) / max(target$mean_load, 0.1)
   )
-  # Normalize by SD of each stat (computed from Gen 0 pilot batch).
-  # Before scaling is available, use raw differences.
   if (!is.null(stat_scales)) {
     diffs <- diffs / stat_scales
   }
   sqrt(sum(diffs^2))
 }
 
-#' Compute normalization scales from a set of valid particles.
-#' Returns the SD of each summary stat, with a floor to avoid division by zero.
 compute_stat_scales <- function(particles, target) {
-  # Compute diffs the same way as compute_distance, then take SD
   rel_load <- (particles$mean_load - target$mean_load) / max(target$mean_load, 0.1)
   scales <- c(
-    log_mode1 = sd(particles$log_mode1, na.rm = TRUE),
-    log_mode2 = sd(particles$log_mode2, na.rm = TRUE),
-    weight1   = sd(particles$weight1, na.rm = TRUE),
+    med_near  = sd(particles$med_near, na.rm = TRUE),
+    med_far   = sd(particles$med_far, na.rm = TRUE),
+    near_frac = sd(particles$near_frac, na.rm = TRUE),
     mean_load = sd(rel_load, na.rm = TRUE)
   )
-  # Floor: if a stat has zero variance, use 1 (no scaling)
   scales[is.na(scales) | scales < 1e-10] <- 1
   scales
 }
@@ -262,16 +271,18 @@ ui <- fluidPage(
 
       h4("Target statistics"),
       div(class = "target-box",
-        numericInput("target_mode1", "Distance mode 1", 100, min = 1),
-        numericInput("target_mode2", "Distance mode 2", 2000, min = 10),
-        numericInput("target_weight1", "Weight of mode 1", 0.3,
+        numericInput("target_med_near", "Median near-distance", 20, min = 1),
+        numericInput("target_med_far", "Median far-distance", 5000, min = 10),
+        numericInput("target_near_frac", "Fraction near-distance", 0.5,
                      min = 0, max = 1, step = 0.05),
         numericInput("target_load", "Mean mutation load", 10, min = 0,
-                     step = 1)
+                     step = 1),
+        numericInput("near_far_threshold", "Near/far threshold (units)", 500,
+                     min = 5, step = 50)
       ),
 
       h4("Algorithm"),
-      numericInput("n_particles", "Particles per generation", 40,
+      numericInput("n_particles", "Particles per generation", 200,
                    min = 10, step = 10),
       numericInput("max_generations", "Max generations", 10, min = 1),
       sliderInput("retention_frac", "Retention fraction", 0.5,
@@ -280,10 +291,12 @@ ui <- fluidPage(
                   min = 0.05, max = 0.5, step = 0.05),
 
       h4("Simulation"),
-      numericInput("max_units", "Max array units", 2000, min = 500,
+      numericInput("mu_total", "Mutation rate (per base per gen)", 1e-4,
+                   min = 1e-8, max = 1e-2, step = 1e-5),
+      numericInput("max_units", "Max array units", 20000, min = 500,
                    step = 1000),
-      numericInput("max_t", "Max generations per sim", 2000,
-                   min = 100, step = 500),
+      numericInput("max_t", "Max generations per sim", 20000,
+                   min = 100, step = 1000),
       numericInput("sim_timeout", "Per-particle timeout (sec)", 10,
                    min = 1, max = 120, step = 1)
     ),
@@ -294,15 +307,11 @@ ui <- fluidPage(
         id = "tabs",
         tabPanel("Live Dashboard",
           fluidRow(
-            column(6, plotOutput("convergence_plot", height = "280px")),
-            column(6, plotOutput("best_stats_plot", height = "280px"))
+            column(9, plotOutput("stats_evolution_plot", height = "300px")),
+            column(3, plotOutput("convergence_plot", height = "300px"))
           ),
           fluidRow(
-            column(12, plotOutput("param_posterior_plot", height = "300px"))
-          ),
-          fluidRow(
-            column(12, h4("Current generation particles"),
-                   tableOutput("particles_table"))
+            column(12, plotOutput("param_evolution_plot", height = "350px"))
           )
         ),
         tabPanel("Best Fit Explorer",
@@ -354,10 +363,11 @@ server <- function(input, output, session) {
   )
 
   get_target <- reactive({
-    list(log_mode1 = log10(input$target_mode1),
-         log_mode2 = log10(input$target_mode2),
-         weight1   = input$target_weight1,
-         mean_load = input$target_load)
+    list(med_near  = log10(input$target_med_near),
+         med_far   = log10(input$target_med_far),
+         near_frac = input$target_near_frac,
+         mean_load = input$target_load,
+         near_far_threshold = input$near_far_threshold)
   })
 
   # --- Start / Stop ---
@@ -398,9 +408,10 @@ server <- function(input, output, session) {
       n_particles <- input$n_particles
       timeout <- input$sim_timeout
 
-      # Process a batch of particles (up to 2 seconds of wall time per batch)
+      # Process a batch of particles. Large budget since plots only update
+      # between generations (they depend on all_particles, not particles).
       batch_start <- proc.time()[3]
-      batch_budget <- 2  # seconds before yielding to UI
+      batch_budget <- 30  # seconds before yielding to UI
 
       while (proc.time()[3] - batch_start < batch_budget) {
         gen <- state$generation
@@ -421,7 +432,7 @@ server <- function(input, output, session) {
             for (ri in seq_len(nrow(particles))) {
               particles[ri, distance := compute_distance(
                 .SD, target, state$stat_scales),
-                .SDcols = c("log_mode1", "log_mode2", "weight1", "mean_load")]
+                .SDcols = c("med_near", "med_far", "near_frac", "mean_load")]
             }
             state$particles <- particles
           }
@@ -485,25 +496,21 @@ server <- function(input, output, session) {
           proposed <- perturb_particle(parent, state$param_sds)
         }
 
-        # Run simulation with wall-clock time limit (no forking).
+        # Run simulation (max_t is the guard rail for slow sims).
+        # No setTimeLimit — it can crash R when interrupting C++ code.
         res <- tryCatch(
-          {
-            setTimeLimit(elapsed = timeout, transient = TRUE)
-            run_and_summarize_one(
-              proposed,
-              max_units   = input$max_units,
-              max_t       = input$max_t,
-              init_l      = 30L,
-              init_k0     = 10L,
-              sim_timeout = timeout,
-              target      = target
-            )
-          },
+          run_and_summarize_one(
+            proposed,
+            max_units   = input$max_units,
+            max_t       = input$max_t,
+            init_l      = 30L,
+            init_k0     = 10L,
+            sim_timeout = timeout,
+            target      = target,
+            mu_total    = input$mu_total
+          ),
           error = function(e) {
-            list(stats = NULL, sim = NULL, elapsed = timeout)
-          },
-          finally = {
-            setTimeLimit(elapsed = Inf, transient = TRUE)
+            list(stats = NULL, sim = NULL, elapsed = NA_real_)
           }
         )
 
@@ -608,75 +615,82 @@ server <- function(input, output, session) {
                  size = 6, colour = "grey50"))
     }
 
-    # Two-panel: convergence + failure rate
-    # IMPORTANT: copy() to avoid modifying state$convergence by reference
     conv <- copy(conv)
-    conv[, fail_rate := (n_failed + n_timeout) /
-           (n_valid + n_failed + n_timeout)]
+    conv[, n_fail_total := n_failed + n_timeout]
 
-    p1 <- ggplot(conv, aes(x = gen)) +
+    ggplot(conv, aes(x = gen)) +
       geom_line(aes(y = median, colour = "Median"), linewidth = 1) +
-      geom_point(aes(y = median, colour = "Median"), size = 2.5) +
+      geom_point(aes(y = median, colour = "Median"), size = 2) +
       geom_line(aes(y = best, colour = "Best"), linewidth = 1) +
-      geom_point(aes(y = best, colour = "Best"), size = 2.5) +
+      geom_point(aes(y = best, colour = "Best"), size = 2) +
+      geom_text(aes(y = max(median) * 1.05, label = n_fail_total),
+                size = 2.5, colour = "grey40") +
       scale_colour_manual(values = c("Median" = "steelblue",
                                       "Best" = "firebrick")) +
-      theme_classic(base_size = 12) +
+      theme_classic(base_size = 11) +
       labs(x = "Generation", y = "Distance",
-           colour = NULL, title = "Convergence") +
-      theme(legend.position = c(0.8, 0.8))
-
-    p2 <- ggplot(conv, aes(x = gen, y = fail_rate)) +
-      geom_col(fill = "grey40", alpha = 0.7, width = 0.6) +
-      geom_text(aes(label = n_failed + n_timeout), vjust = -0.3, size = 3) +
-      scale_y_continuous(labels = scales::percent_format(),
-                         limits = c(0, max(0.1, max(conv$fail_rate) * 1.2))) +
-      theme_classic(base_size = 12) +
-      labs(x = "Generation", y = "Failure rate",
-           title = "Sim failures per generation")
-
-    cowplot::plot_grid(p1, p2, nrow = 1, rel_widths = c(2, 1))
+           colour = NULL, title = "Convergence (numbers = failures)") +
+      theme(legend.position = c(0.8, 0.8),
+            legend.background = element_rect(fill = "transparent"),
+            legend.key = element_rect(fill = "transparent"))
   }, res = 100)
 
-  # --- Best particle stats vs targets ---
-  output$best_stats_plot <- renderPlot({
-    conv <- state$convergence
+  # --- Summary stat evolution across generations (violins per gen) ---
+  output$stats_evolution_plot <- renderPlot({
     all_p <- state$all_particles
     if (length(all_p) == 0) {
       return(ggplot() + theme_void() +
-        annotate("text", x = 0.5, y = 0.5, label = "No results yet",
+        annotate("text", x = 0.5, y = 0.5, label = "Summary stats will appear here",
                  size = 6, colour = "grey50"))
     }
 
     target <- get_target()
-    last <- all_p[[length(all_p)]]
-    valid <- last[is.finite(distance)][order(distance)]
-    if (nrow(valid) == 0) return(ggplot() + theme_void())
-    best <- valid[1]
 
-    stats_dt <- data.table(
-      stat    = c("log(mode1)", "log(mode2)", "weight1", "mean_load"),
-      target  = c(target$log_mode1, target$log_mode2,
-                  target$weight1, target$mean_load),
-      current = c(best$log_mode1, best$log_mode2,
-                  best$weight1, best$mean_load)
+    # Collect stats from all generations
+    gen_list <- lapply(seq_along(all_p), function(i) {
+      p <- all_p[[i]]
+      valid <- p[is.finite(distance)]
+      if (nrow(valid) == 0) return(NULL)
+      data.table(
+        gen       = i - 1L,
+        med_near  = 10^valid$med_near,
+        med_far   = 10^valid$med_far,
+        near_frac = valid$near_frac,
+        mean_load = valid$mean_load,
+        n_units   = valid$n_units,
+        n_gens    = valid$n_gens
+      )
+    })
+    gen_dt <- rbindlist(gen_list[!sapply(gen_list, is.null)])
+    if (nrow(gen_dt) == 0) return(ggplot() + theme_void())
+
+    target_vals <- data.table(
+      stat = c("med_near", "med_far", "near_frac", "mean_load", "n_units", "n_gens"),
+      target = c(10^target$med_near, 10^target$med_far,
+                 target$near_frac, target$mean_load, NA_real_, NA_real_)
     )
-    stats_long <- melt(stats_dt, id.vars = "stat",
-                       variable.name = "type", value.name = "value")
 
-    ggplot(stats_long, aes(x = stat, y = value, fill = type)) +
-      geom_col(position = "dodge", alpha = 0.8) +
-      scale_fill_manual(values = c(target = "grey60", current = "firebrick"),
-                        labels = c("Target", "Best fit")) +
-      theme_classic(base_size = 13) +
-      labs(x = NULL, y = "Value", fill = NULL,
-           title = paste0("Best fit (dist = ",
-                          round(best$distance, 3), ")")) +
-      theme(legend.position = c(0.15, 0.85))
+    melt_dt <- melt(gen_dt, id.vars = "gen",
+                    measure.vars = c("med_near", "med_far", "near_frac", "mean_load",
+                                     "n_units", "n_gens"),
+                    variable.name = "stat", value.name = "value")
+    melt_dt[, gen_f := factor(gen)]
+
+    ggplot(melt_dt, aes(x = gen_f, y = value)) +
+      geom_violin(fill = "steelblue", alpha = 0.4, scale = "width",
+                  linewidth = 0.3) +
+      geom_jitter(width = 0.15, size = 0.3, alpha = 0.2) +
+      geom_hline(data = target_vals, aes(yintercept = target),
+                 colour = "firebrick", linewidth = 0.8, linetype = "dashed") +
+      facet_wrap(~ stat, scales = "free_y", nrow = 1) +
+      theme_classic(base_size = 11) +
+      theme(strip.background = element_blank()) +
+      labs(x = "Generation", y = NULL,
+           title = "Summary statistics across generations (target = red dashed)")
   }, res = 100)
 
-  # --- Parameter posteriors ---
-  output$param_posterior_plot <- renderPlot({
+  # --- Parameter evolution across generations (violins) ---
+  output$param_evolution_plot <- renderPlot({
     all_p <- state$all_particles
     if (length(all_p) == 0) {
       return(ggplot() + theme_void() +
@@ -685,56 +699,53 @@ server <- function(input, output, session) {
                  size = 6, colour = "grey50"))
     }
 
-    # Show top 50% of most recent generation
-    last <- all_p[[length(all_p)]]
-    valid <- last[is.finite(distance)][order(distance)]
-    if (nrow(valid) < 3) return(ggplot() + theme_void())
-    n_show <- max(3, as.integer(nrow(valid) * 0.5))
-    top <- valid[seq_len(n_show)]
+    rate_params <- c("p_local_dup", "p_distal_dup", "p_del_chunk")
+    shape_params <- c("local_shape", "local_scale", "distal_shape",
+                      "distal_scale", "del_shape", "del_scale")
 
-    # Transform to natural scale for the 4 rate params
-    display <- copy(top)
-    for (j in 1:4) {
-      pn <- PARAMS[[j]]$name
-      set(display, j = pn, value = 10^display[[pn]])
-    }
+    gen_list <- lapply(seq_along(all_p), function(i) {
+      p <- all_p[[i]]
+      valid <- p[is.finite(distance)]
+      if (nrow(valid) == 0) return(NULL)
+      d <- copy(valid)
+      # Transform rates to natural scale
+      for (j in 1:3) {
+        pn <- PARAMS[[j]]$name
+        set(d, j = pn, value = 10^d[[pn]])
+      }
+      d[, gen := i - 1L]
+      d
+    })
+    gen_dt <- rbindlist(gen_list[!sapply(gen_list, is.null)], fill = TRUE)
+    if (nrow(gen_dt) == 0) return(ggplot() + theme_void())
 
-    # Melt for faceted plot — only show the 4 key rates
-    key_params <- c("p_local_dup", "p_distal_dup", "p_del_chunk", "mu_total")
-    melt_dt <- melt(display[, ..key_params], measure.vars = key_params,
-                    variable.name = "param", value.name = "value")
+    gen_dt[, gen_f := factor(gen)]
 
-    ggplot(melt_dt, aes(x = value)) +
-      geom_histogram(aes(y = after_stat(density)),
-                     bins = 20, fill = "steelblue", alpha = 0.6) +
-      geom_density(linewidth = 0.5) +
-      facet_wrap(~ param, scales = "free", nrow = 1) +
-      scale_x_log10() +
-      theme_classic(base_size = 11) +
-      labs(x = NULL, y = "Density",
-           title = paste0("Parameter posteriors (top 50%, gen ",
-                          length(all_p) - 1, ")"))
+    # Rates (log scale)
+    melt_rates <- melt(gen_dt[, c("gen_f", rate_params), with = FALSE],
+                       id.vars = "gen_f", variable.name = "param", value.name = "value")
+    p1 <- ggplot(melt_rates, aes(x = gen_f, y = value)) +
+      geom_violin(fill = "darkorange", alpha = 0.4, scale = "width", linewidth = 0.3) +
+      geom_jitter(width = 0.15, size = 0.2, alpha = 0.15) +
+      facet_wrap(~ param, scales = "free_y", nrow = 1) +
+      scale_y_log10() +
+      theme_classic(base_size = 9) +
+      theme(strip.background = element_blank()) +
+      labs(x = "Generation", y = NULL, title = "Rate parameters across generations")
+
+    # Shape/scale (linear)
+    melt_shapes <- melt(gen_dt[, c("gen_f", shape_params), with = FALSE],
+                        id.vars = "gen_f", variable.name = "param", value.name = "value")
+    p2 <- ggplot(melt_shapes, aes(x = gen_f, y = value)) +
+      geom_violin(fill = "darkorange", alpha = 0.4, scale = "width", linewidth = 0.3) +
+      geom_jitter(width = 0.15, size = 0.2, alpha = 0.15) +
+      facet_wrap(~ param, scales = "free_y", nrow = 1) +
+      theme_classic(base_size = 9) +
+      theme(strip.background = element_blank()) +
+      labs(x = "Generation", y = NULL, title = "Chunk-size parameters")
+
+    cowplot::plot_grid(p1, p2, ncol = 1)
   }, res = 100)
-
-  # --- Particles table (top 8 by distance) ---
-  output$particles_table <- renderTable({
-    p <- state$particles
-    if (is.null(p) || nrow(p) == 0) return(NULL)
-
-    show <- p[order(distance)][seq_len(min(8, nrow(p)))]
-
-    data.frame(
-      rank      = seq_len(nrow(show)),
-      distance  = round(show$distance, 3),
-      mode1     = round(10^show$log_mode1),
-      mode2     = round(10^show$log_mode2),
-      weight1   = round(show$weight1, 2),
-      mean_load = round(show$mean_load, 1),
-      units     = show$n_units,
-      gens      = show$n_gens,
-      time_s    = round(show$elapsed, 1)
-    )
-  }, digits = 3)
 
   # --- Best Fit Explorer ---
   output$top_table <- renderTable({
@@ -748,14 +759,13 @@ server <- function(input, output, session) {
     data.frame(
       rank        = seq_len(n_show),
       distance    = round(top$distance, 3),
-      mode1       = round(10^top$log_mode1),
-      mode2       = round(10^top$log_mode2),
-      weight1     = round(top$weight1, 2),
+      med_near    = round(10^top$med_near),
+      med_far     = round(10^top$med_far),
+      near_frac   = round(top$near_frac, 2),
       mean_load   = round(top$mean_load, 1),
       p_local     = signif(10^top$p_local_dup, 2),
       p_distal    = signif(10^top$p_distal_dup, 2),
       p_del       = signif(10^top$p_del_chunk, 2),
-      mu          = signif(10^top$mu_total, 2),
       local_shp   = round(top$local_shape, 1),
       local_scl   = round(top$local_scale, 1),
       distal_shp  = round(top$distal_shape, 1),
@@ -775,13 +785,13 @@ server <- function(input, output, session) {
     row <- valid[rank]
 
     withProgress(message = "Re-running best particle...", value = 0.3, {
-      sim_args <- params_to_args(row)
+      sim_args <- params_to_args(row, input$mu_total)
       sim <- suppressWarnings(run_sim_ps(
         max_units = input$max_units, init_l = 30, init_k0 = 10,
         p_local_dup = sim_args$p_local_dup,
         p_distal_dup = sim_args$p_distal_dup,
         p_del_chunk = sim_args$p_del_chunk,
-        mu_total = sim_args$mu_total,
+        mu_total = input$mu_total,
         local_dist = sim_args$local_dist,
         distal_dist = sim_args$distal_dist,
         del_dist = sim_args$del_dist,

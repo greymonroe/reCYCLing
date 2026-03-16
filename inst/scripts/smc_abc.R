@@ -33,11 +33,12 @@ library(data.table)
 CONFIG <- list(
   # Target summary statistics (what your real data looks like)
   target = list(
-    log_mode1  = 2.0,        # log10 of first distance mode (100)
-    log_mode2  = 3.3,        # log10 of second distance mode (~2000)
-    weight1    = 0.3,        # relative weight of the near-mode peak
-    mean_load  = 10          # mean mismatches to consensus per monomer
+    med_near   = log10(20),   # log10 of median near-distance (~20)
+    med_far    = log10(5000), # log10 of median far-distance (~5000)
+    near_frac  = 0.3,         # fraction of pairs that are near (<= threshold)
+    mean_load  = 10           # mean mismatches to consensus per monomer
   ),
+  near_far_threshold = 100,   # distance threshold separating near/far pairs
 
   # Distance scaling: computed automatically from Gen 0 pilot batch.
   # Each summary stat is normalized by its SD across the pilot particles,
@@ -86,19 +87,21 @@ while (i <= length(args)) {
   else if (a == "--conv_tol")        { CONFIG$conv_tol <- as.numeric(v) }
   else if (a == "--conv_patience")   { CONFIG$conv_patience <- as.integer(v) }
   # Target statistics
-  else if (a == "--target_mode1")    { CONFIG$target$log_mode1 <- log10(as.numeric(v)) }
-  else if (a == "--target_mode2")    { CONFIG$target$log_mode2 <- log10(as.numeric(v)) }
-  else if (a == "--target_weight1")  { CONFIG$target$weight1 <- as.numeric(v) }
-  else if (a == "--target_load")     { CONFIG$target$mean_load <- as.numeric(v) }
+  else if (a == "--target_med_near")   { CONFIG$target$med_near <- log10(as.numeric(v)) }
+  else if (a == "--target_med_far")    { CONFIG$target$med_far <- log10(as.numeric(v)) }
+  else if (a == "--target_near_frac")  { CONFIG$target$near_frac <- as.numeric(v) }
+  else if (a == "--target_load")       { CONFIG$target$mean_load <- as.numeric(v) }
+  else if (a == "--near_far_threshold") { CONFIG$near_far_threshold <- as.numeric(v) }
   else if (a == "--help") {
     cat("
 SMC-ABC parameter inference for reCYCLing tandem repeat simulations.
 
 Target statistics (what your real data looks like):
-  --target_mode1 NUM     First distance mode in units (default: 100)
-  --target_mode2 NUM     Second distance mode in units (default: 2000)
-  --target_weight1 NUM   Weight of the near-mode peak, 0-1 (default: 0.3)
-  --target_load NUM      Mean mismatches to consensus (default: 10)
+  --target_med_near NUM    Median near-distance in units (default: 20)
+  --target_med_far NUM     Median far-distance in units (default: 5000)
+  --target_near_frac NUM   Fraction of pairs below threshold (default: 0.3)
+  --target_load NUM        Mean mismatches to consensus (default: 10)
+  --near_far_threshold NUM Distance threshold separating near/far (default: 100)
 
 Distance scaling: Automatically computed from Gen 0 pilot batch. Each
   summary stat is normalized by its SD, so no manual weights needed.
@@ -228,7 +231,7 @@ fit_2gauss <- function(x, max_iter = 100, max_n = 10000) {
 #' Includes early rejection checks before expensive summary stats.
 run_and_summarize <- function(row, config) {
   sim_args <- params_to_args(row)
-  hard_cap <- min(config$max_units * 2L, 40000L)
+  hard_cap <- min(config$max_units * 2L, 50000L)
 
   sim <- tryCatch(
     {
@@ -255,6 +258,9 @@ run_and_summarize <- function(row, config) {
 
   mono <- sim$monomers
 
+  # Reject absurdly large arrays (explosive dup rate blew past hard_cap)
+  if (nrow(mono) > config$max_units * 3) return(NULL)
+
   # --- Full summary statistics ---
   # Compute pairwise distances from sampled identical pairs directly,
   # bypassing the full pairs table (which can be millions of rows at 20K units).
@@ -269,7 +275,7 @@ run_and_summarize <- function(row, config) {
                        use.names = FALSE)
         list(d = abs(positions[id1] - positions[id2]))
       } else {
-        n_sample <- min(5000L, n * (n - 1L) %/% 2L)
+        n_sample <- min(5000L, as.numeric(n) * (n - 1L) %/% 2)
         s1 <- sample.int(n, n_sample, replace = TRUE)
         s2 <- sample.int(n, n_sample, replace = TRUE)
         keep <- s1 != s2
@@ -280,8 +286,14 @@ run_and_summarize <- function(row, config) {
   dists <- dists[dists > 0]
   if (length(dists) < 20) return(NULL)
 
-  fit <- fit_2gauss(log10(dists))
-  if (is.null(fit)) return(NULL)
+  # Quantile-based summary stats
+  threshold <- config$near_far_threshold
+  near <- dists[dists <= threshold]
+  far  <- dists[dists > threshold]
+  near_frac <- length(near) / length(dists)
+  med_near  <- if (length(near) >= 5) median(log10(near)) else NA_real_
+  med_far   <- if (length(far) >= 5) median(log10(far)) else NA_real_
+  if (is.na(med_near) || is.na(med_far)) return(NULL)
 
   ct <- tryCatch(counts_long_nogap(mono$bponly), error = function(e) NULL)
   if (is.null(ct)) return(NULL)
@@ -289,9 +301,9 @@ run_and_summarize <- function(row, config) {
   load <- mu_load_from_consensus(mono$bponly, cons)
 
   data.table(
-    log_mode1 = fit$log_mode1,
-    log_mode2 = fit$log_mode2,
-    weight1   = fit$weight1,
+    med_near  = med_near,
+    med_far   = med_far,
+    near_frac = near_frac,
     mean_load = mean(load),
     n_units   = nrow(mono),
     n_pairs   = length(dists)
@@ -413,10 +425,11 @@ run_smc_abc <- function(config) {
       config$conv_tol * 100, "% improvement\n")
   cat("Max units:", config$max_units, "\n")
   cat("Timeout:", config$sim_timeout, "s per particle\n")
-  cat("Targets: mode1=", 10^config$target$log_mode1,
-      " mode2=", 10^config$target$log_mode2,
-      " w1=", config$target$weight1,
-      " load=", config$target$mean_load, "\n")
+  cat("Targets: med_near=", 10^config$target$med_near,
+      " med_far=", 10^config$target$med_far,
+      " near_frac=", config$target$near_frac,
+      " load=", config$target$mean_load,
+      " threshold=", config$near_far_threshold, "\n")
   cat("Output:", config$outdir, "\n\n")
 
   # Track convergence
@@ -459,7 +472,7 @@ run_smc_abc <- function(config) {
   for (ri in seq_len(nrow(particles))) {
     particles[ri, distance := compute_distance(
       .SD, config$target, stat_scales),
-      .SDcols = c("log_mode1", "log_mode2", "weight1", "mean_load")]
+      .SDcols = c("med_near", "med_far", "near_frac", "mean_load")]
   }
   best_dist <- min(particles$distance)
   med_dist  <- median(particles$distance)
@@ -481,9 +494,9 @@ run_smc_abc <- function(config) {
 
     # Show current best
     best <- kept[1]
-    cat(sprintf("  Best: mode1=%.0f mode2=%.0f w1=%.2f load=%.1f (dist=%.3f)\n",
-                10^best$log_mode1, 10^best$log_mode2,
-                best$weight1, best$mean_load, best$distance))
+    cat(sprintf("  Best: med_near=%.0f med_far=%.0f frac=%.2f load=%.1f (dist=%.3f)\n",
+                10^best$med_near, 10^best$med_far,
+                best$near_frac, best$mean_load, best$distance))
 
     # Adaptive perturbation: SD per parameter = 2 * empirical SD of survivors
     param_sds <- compute_param_sds(kept, config$perturbation_sd)
@@ -563,12 +576,12 @@ run_smc_abc <- function(config) {
     pn <- PARAMS[[j]]$name
     top_display[[pn]] <- sapply(top_display[[pn]], PARAMS[[j]]$transform)
   }
-  top_display[, mode1 := 10^log_mode1]
-  top_display[, mode2 := 10^log_mode2]
+  top_display[, near := 10^med_near]
+  top_display[, far := 10^med_far]
   print(top_display[, .(p_local_dup, p_distal_dup, p_del_chunk, mu_total,
                          local_shape, local_scale, distal_shape, distal_scale,
                          del_shape, del_scale,
-                         mode1, mode2, weight1, mean_load, distance)],
+                         near, far, near_frac, mean_load, distance)],
         digits = 3)
 
   cat("\nPosterior summary (top 50%):\n")
