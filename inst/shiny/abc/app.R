@@ -45,9 +45,9 @@ help_label <- function(text, tooltip) {
 # All 9 possible ABC parameters with defaults and prior ranges.
 # Which ones are actually fitted is controlled by checkboxes in the UI.
 ALL_PARAMS <- list(
-  list(name = "p_local_dup",  lo = -5.5, hi = -3.0, default = -4.5,
+  list(name = "p_local_dup",  lo = -5.5, hi = -3.5, default = -4.5,
        transform = function(x) 10^x, label = "Local dup rate"),
-  list(name = "p_distal_dup", lo = -2,   hi = -0.3, default = -1.3,
+  list(name = "p_distal_dup", lo = -2.5, hi = -1.0, default = -1.3,
        transform = function(x) 10^x, label = "Distal dup rate"),
   list(name = "p_del_chunk",  lo = -6,   hi = -4,   default = -5,
        transform = function(x) 10^x, label = "Deletion rate"),
@@ -81,12 +81,15 @@ sample_prior_one <- function() {
 params_to_args <- function(row, mu_total, fixed_vals = list()) {
   # Merge fitted (from row) with fixed (from UI)
   get_val <- function(pname) {
-    if (pname %in% names(row)) row[[pname]]
-    else if (pname %in% names(fixed_vals)) fixed_vals[[pname]]
-    else {
+    if (pname %in% names(row)) {
+      val <- row[[pname]]
+    } else if (pname %in% names(fixed_vals)) {
+      val <- fixed_vals[[pname]]
+    } else {
       idx <- which(ALL_PARAM_NAMES == pname)
-      ALL_PARAMS[[idx]]$default
+      val <- ALL_PARAMS[[idx]]$default
     }
+    val
   }
   list(
     p_local_dup  = 10^get_val("p_local_dup"),
@@ -142,17 +145,21 @@ run_and_summarize_one <- function(row, sim_gens, init_l, init_k0,
   # Run for fixed number of generations (molecular clock).
   # Cap array size to avoid explosive growth eating all memory/time.
   target_size <- if (!is.null(target)) target$target_array_size else 20000
-  hard_cap <- as.integer(target_size * 5)
+  hard_cap <- as.integer(target_size * 3)
 
+  # max_units set very high so ONLY max_t controls when the sim stops.
+  # The molecular clock requires running for exactly sim_gens generations.
+  # hard_cap is the safety valve for memory — if array explodes past this, the
+  # sim breaks out and we reject the particle.
   sim <- tryCatch(
     suppressWarnings(run_sim_ps(
-      max_units = hard_cap, max_t = sim_gens, hard_cap = hard_cap,
+      max_units = hard_cap + 1L, max_t = as.integer(sim_gens), hard_cap = hard_cap,
       init_l = init_l, init_k0 = init_k0,
       p_local_dup = sim_args$p_local_dup, p_distal_dup = sim_args$p_distal_dup,
       p_del_chunk = sim_args$p_del_chunk, mu_total = sim_args$mu_total,
       local_dist = sim_args$local_dist, distal_dist = sim_args$distal_dist,
       del_dist = sim_args$del_dist, verbose = FALSE,
-      compute_pairs = FALSE  # skip O(n^2) pairs for ABC; distances sampled below
+      compute_pairs = FALSE
     )),
     error = function(e) NULL
   )
@@ -164,8 +171,10 @@ run_and_summarize_one <- function(row, sim_gens, init_l, init_k0,
   n_gens <- length(sim$L_vec)
 
   # Reject if array went extinct or got absurdly large
-  if (nrow(mono) < 50 || nrow(mono) > hard_cap)
+  if (nrow(mono) < 50 || nrow(mono) > hard_cap) {
+    # cat("    reject: size", nrow(mono), "(need 50-", hard_cap, ")\n")
     return(list(stats = NULL, sim = NULL, elapsed = elapsed))
+  }
 
   # --- Full summary statistics ---
   # Compute pairwise distances from sampled identical pairs directly,
@@ -218,7 +227,6 @@ run_and_summarize_one <- function(row, sim_gens, init_l, init_k0,
   mean_load_est <- mean(load_quick)
 
   # Biological gate: if mutation load is wildly off target, reject.
-  # This is a hard constraint — we KNOW roughly what load should be.
   if (!is.null(target) && !is.na(target$mean_load) && target$mean_load > 0) {
     if (mean_load_est > target$mean_load * 3 || mean_load_est < target$mean_load / 3)
       return(list(stats = NULL, sim = sim, elapsed = elapsed))
@@ -273,11 +281,11 @@ perturb_particle <- function(particle, param_sds) {
     pname <- PARAMS[[j]]$name
     new[[pname]] <- new[[pname]] + rnorm(1, 0, param_sds[[pname]])
   }
-  # Enforce physical constraints: shape params > 0, scale params > 0
+  # Enforce physical constraints only on params that are being fitted
   for (pname in c("local_shape", "distal_shape", "del_shape"))
-    new[[pname]] <- max(0.01, new[[pname]])
+    if (pname %in% names(new)) new[[pname]] <- max(0.01, new[[pname]])
   for (pname in c("local_scale", "distal_scale", "del_scale"))
-    new[[pname]] <- max(0.1, new[[pname]])
+    if (pname %in% names(new)) new[[pname]] <- max(0.1, new[[pname]])
   new
 }
 
@@ -414,7 +422,8 @@ ui <- fluidPage(
           column(10, numericInput("fixed_del_scale",
             help_label("Del chunk scale", "Gamma scale for deletion. With shape=2, scale=15: mean deletion = 30 units. Larger values = more aggressive deletion per event."),
             15, min = 1, step = 5))
-        )
+        ),
+        htmlOutput("search_ranges")
       ),
 
       h4(help_label("Algorithm", "Controls for the SMC-ABC (Sequential Monte Carlo Approximate Bayesian Computation) inference. The algorithm works like evolution: a population of candidate parameter sets ('particles') is proposed, scored against your data, and the best are selected and mutated to form the next generation.")),
@@ -515,6 +524,43 @@ server <- function(input, output, session) {
       '</small>'))
   })
 
+  # Show dynamic search ranges for fitted parameters
+  output$search_ranges <- renderUI({
+    lines <- character()
+    for (p in ALL_PARAMS) {
+      checkbox_id <- paste0("fit_", p$name)
+      fixed_id <- paste0("fixed_", p$name)
+      is_fitted <- isTRUE(input[[checkbox_id]])
+      val <- input[[fixed_id]]
+      if (!is_fitted || is.null(val) || !is.finite(val)) next
+      if (p$name %in% c("p_local_dup", "p_distal_dup", "p_del_chunk")) {
+        lo <- val - 0.75
+        hi <- min(val + 0.75, p$hi)
+        lines <- c(lines, sprintf(
+          "<b>%s</b>: [%.2f, %.2f] (%.2g to %.2g)",
+          p$label, lo, hi, 10^lo, 10^hi))
+      } else if (grepl("shape", p$name)) {
+        lo <- max(0.1, val * 0.4)
+        hi <- val * 2.5
+        lines <- c(lines, sprintf("<b>%s</b>: [%.1f, %.1f]",
+                                  p$label, lo, hi))
+      } else {
+        lo <- max(0.1, val * 0.2)
+        hi <- val * 3.0
+        lines <- c(lines, sprintf("<b>%s</b>: [%.0f, %.0f]",
+                                  p$label, lo, hi))
+      }
+    }
+    if (length(lines) == 0) {
+      return(HTML('<small style="color: #999;"><i>Check boxes above to fit parameters</i></small>'))
+    }
+    HTML(paste0(
+      '<div style="margin-top: 8px; padding: 6px; background: #f0f4f8; border-radius: 4px;">',
+      '<small style="color: #333;"><b>Initial search ranges:</b><br>',
+      paste(lines, collapse = "<br>"),
+      '</small></div>'))
+  })
+
   get_target <- reactive({
     list(med_near  = log10(input$target_med_near),
          med_far   = log10(input$target_med_far),
@@ -525,6 +571,7 @@ server <- function(input, output, session) {
   })
 
   # --- Build PARAMS from checkboxes ---
+  # Dynamic prior: center search range on the entered value, with sensible spread.
   build_params <- function() {
     fitted <- list()
     fixed  <- list()
@@ -532,7 +579,24 @@ server <- function(input, output, session) {
       checkbox_id <- paste0("fit_", p$name)
       fixed_id    <- paste0("fixed_", p$name)
       if (isTRUE(input[[checkbox_id]])) {
-        fitted[[length(fitted) + 1]] <- p
+        val <- input[[fixed_id]]
+        # Dynamic prior: center on entered value +/- 0.75 log units (rates)
+        # or *0.4/2.5 (linear). Upper bound clamped to physical max to prevent
+        # explosive growth (rates are probabilities, can't exceed 10^0 = 1).
+        if (p$name %in% c("p_local_dup", "p_distal_dup", "p_del_chunk")) {
+          lo <- val - 0.75
+          hi <- min(val + 0.75, p$hi)  # clamp to physical upper bound
+        } else if (grepl("shape", p$name)) {
+          lo <- max(0.1, val * 0.4)
+          hi <- val * 2.5
+        } else {
+          lo <- max(0.1, val * 0.2)
+          hi <- val * 3.0
+        }
+        mod_p <- p
+        mod_p$lo <- lo
+        mod_p$hi <- hi
+        fitted[[length(fitted) + 1]] <- mod_p
       } else {
         fixed[[p$name]] <- input[[fixed_id]]
       }
@@ -568,166 +632,189 @@ server <- function(input, output, session) {
     state$stat_scales <- NULL
   })
 
-  observeEvent(input$stop, { state$running <- FALSE })
+  observeEvent(input$stop, {
+    state$running <- FALSE
+    cat("ABC stopped by user.\n")
+  })
 
-  # --- Main cooperative loop: process a batch of particles per cycle ---
-  # Runs multiple particles before yielding to Shiny for UI updates.
-  # This avoids the overhead of ggplot re-rendering after every single particle.
+  # --- Main cooperative loop: one particle per cycle ---
+  # Processes one particle then yields to Shiny so status text updates live.
+  # Plots only re-render at generation boundaries (they depend on all_particles).
   observe({
-    # Schedule next cycle FIRST so return() inside isolate can't skip it
-    invalidateLater(100)
+    invalidateLater(0)  # schedule next cycle immediately
     if (!state$running) return()
 
     isolate({
       target <- get_target()
       n_particles <- input$n_particles
       timeout <- input$sim_timeout
+      gen <- state$generation
+      idx <- state$particle_idx
 
-      # Process a batch of particles. Large budget since plots only update
-      # between generations (they depend on all_particles, not particles).
-      batch_start <- proc.time()[3]
-      batch_budget <- 30  # seconds before yielding to UI
+      # --- Need to start a new generation? ---
+      if (idx >= n_particles) {
+        particles <- state$particles
+        n_valid <- if (!is.null(particles)) nrow(particles) else 0L
 
-      while (proc.time()[3] - batch_start < batch_budget) {
-        gen <- state$generation
-        idx <- state$particle_idx
+        cat(sprintf("Gen %d complete: %d valid out of %d attempted (%d failed, %d timeout)\n",
+                    gen, n_valid, n_particles, state$n_failed, state$n_timeout))
+        # With elitist selection, even 0 new valid particles is OK —
+        # we still have survivors from previous generations to perturb.
+        # Only stop if Gen 0 itself produced nothing (no data to work with).
+        if (n_valid == 0 && gen == 0) {
+          cat("Gen 0 produced no valid particles. Stopping.\n")
+          state$running <- FALSE
+          return()
+        }
 
-        # --- Need to start a new generation? ---
-        if (idx >= n_particles) {
-          particles <- state$particles
-          n_valid <- if (!is.null(particles)) nrow(particles) else 0L
-
-          # Need at least 3 valid particles to continue
-          if (n_valid < 3) {
-            state$running <- FALSE
-            return()
+        # After Gen 0: compute stat scales from pilot batch
+        if (gen == 0 && is.null(state$stat_scales) && n_valid > 0) {
+          state$stat_scales <- compute_stat_scales(particles, target)
+          cat("Stat scales from Gen 0 pilot:\n")
+          print(state$stat_scales)
+          for (ri in seq_len(nrow(particles))) {
+            particles[ri, distance := compute_distance(
+              .SD, target, state$stat_scales),
+              .SDcols = c("med_near", "med_far", "near_frac", "mean_load", "n_units")]
           }
+          state$particles <- particles
+        }
 
-          # After Gen 0: compute stat scales from pilot batch and recompute
-          # all distances so they're properly normalized going forward.
-          if (gen == 0 && is.null(state$stat_scales)) {
-            state$stat_scales <- compute_stat_scales(particles, target)
-            cat("Stat scales from Gen 0 pilot:\n")
-            print(state$stat_scales)
-            # Recompute Gen 0 distances with proper scaling
-            for (ri in seq_len(nrow(particles))) {
-              particles[ri, distance := compute_distance(
-                .SD, target, state$stat_scales),
-                .SDcols = c("med_near", "med_far", "near_frac", "mean_load", "n_units")]
-            }
-            state$particles <- particles
-          }
-
+        # Record convergence and store particles (even if 0 new valid this gen)
+        if (n_valid > 0) {
           best_d <- min(particles$distance)
           med_d  <- median(particles$distance)
-
-          gen_elapsed <- if (!is.na(state$gen_start_time))
-            round(proc.time()[3] - state$gen_start_time) else NA_real_
-          state$convergence <- rbind(state$convergence,
-            data.table(gen = gen, best = best_d, median = med_d,
-                       n_valid = n_valid,
-                       n_failed = state$n_failed,
-                       n_timeout = state$n_timeout,
-                       elapsed_s = gen_elapsed))
-          state$all_particles[[gen + 1]] <- copy(particles)
-
-          # Selection
-          n_keep <- max(3L, as.integer(n_valid * input$retention_frac))
-          valid <- particles[order(distance)]
-          state$kept <- valid[seq_len(min(n_keep, nrow(valid)))]
-
-          # Convergence check
-          conv <- state$convergence
-          if (nrow(conv) >= 2) {
-            prev_med <- conv$median[nrow(conv) - 1]
-            curr_med <- med_d
-            improvement <- if (is.finite(prev_med) && prev_med > 0)
-              (prev_med - curr_med) / prev_med else 1
-            if (improvement < 0.01) {
-              state$stall_count <- state$stall_count + 1L
-            } else {
-              state$stall_count <- 0L
-            }
-            if (state$stall_count >= 3 || gen >= input$max_generations) {
-              state$running <- FALSE
-              return()
-            }
-          }
-
-          # Prepare next generation — compute adaptive perturbation SDs
-          # from the empirical spread of survivors (Beaumont 2009)
-          state$generation <- gen + 1L
-          state$particle_idx <- 0L
-          state$particles <- NULL
-          state$param_sds <- compute_param_sds(state$kept, input$perturbation_sd)
-          state$n_failed <- 0L
-          state$n_timeout <- 0L
-          state$n_attempts <- 0L
-          state$gen_start_time <- proc.time()[3]
-          next  # Continue processing in this batch
-        }
-
-        # --- Propose a particle ---
-        if (gen == 0 && is.null(state$kept)) {
-          proposed <- sample_prior_one()
         } else {
-          kept <- state$kept
-          if (is.null(kept) || nrow(kept) == 0) {
-            state$running <- FALSE
-            return()
-          }
-          parent <- kept[sample.int(nrow(kept), 1), ..param_names]
-          proposed <- perturb_particle(parent, state$param_sds)
+          # No new valid particles — use previous best/median
+          best_d <- if (nrow(state$convergence) > 0) min(state$convergence$best) else Inf
+          med_d  <- if (nrow(state$convergence) > 0) tail(state$convergence$median, 1) else Inf
         }
 
-        # Run simulation (max_t is the guard rail for slow sims).
-        # No setTimeLimit — it can crash R when interrupting C++ code.
-        res <- tryCatch(
-          run_and_summarize_one(
-            proposed,
-            sim_gens    = get_clock()$sim_gens,
-            init_l      = input$init_l,
-            init_k0     = 10L,
-            sim_timeout = timeout,
-            target      = target,
-            mu_total    = get_clock()$mu_compressed,
-            fixed_vals  = state$fixed_vals
-          ),
-          error = function(e) {
-            list(stats = NULL, sim = NULL, elapsed = NA_real_)
-          }
-        )
+        gen_elapsed <- if (!is.na(state$gen_start_time))
+          round(proc.time()[3] - state$gen_start_time) else NA_real_
+        state$convergence <- rbind(state$convergence,
+          data.table(gen = gen, best = best_d, median = med_d,
+                     n_valid = n_valid,
+                     n_failed = state$n_failed,
+                     n_timeout = state$n_timeout,
+                     elapsed_s = gen_elapsed))
+        if (n_valid > 0) state$all_particles[[gen + 1]] <- copy(particles)
 
-        state$last_particle_time <- res$elapsed
-        state$n_attempts <- state$n_attempts + 1L
+        # Elitist selection: pool this generation with previous survivors.
+        # Even if this gen produced 0 new valid, kept from last gen persists.
+        pool <- if (n_valid > 0) particles else data.table()
+        if (!is.null(state$kept) && nrow(state$kept) > 0) {
+          pool <- if (nrow(pool) > 0) rbind(pool, state$kept, fill = TRUE) else state$kept
+        }
+        if (nrow(pool) == 0) {
+          cat("No valid particles in pool. Stopping.\n")
+          state$running <- FALSE
+          return()
+        }
+        n_pool <- nrow(pool)
+        pool <- unique(pool, by = intersect(param_names, names(pool)))
+        n_keep <- max(3L, as.integer(max(n_valid, n_pool) * input$retention_frac))
+        pool <- pool[order(distance)]
+        state$kept <- pool[seq_len(min(n_keep, nrow(pool)))]
+        cat(sprintf("  Kept %d particles (pool: %d new + %d carried over)\n",
+                    nrow(state$kept), n_valid,
+                    n_pool - n_valid))
 
-        timed_out <- is.null(res$stats) && !is.null(res$elapsed) &&
-                     res$elapsed >= (timeout - 0.5)
-
-        # Always advance — no retrying. Failures are informative.
-        state$particle_idx <- idx + 1L
-
-        if (is.null(res$stats)) {
-          if (timed_out) {
-            state$n_timeout <- state$n_timeout + 1L
+        # Convergence check — only count stalls when we had enough new particles
+        # to meaningfully assess improvement. Otherwise the generation was just
+        # struggling, not converged.
+        conv <- state$convergence
+        if (nrow(conv) >= 2 && n_valid >= 3) {
+          prev_med <- conv$median[nrow(conv) - 1]
+          curr_med <- med_d
+          improvement <- if (is.finite(prev_med) && prev_med > 0)
+            (prev_med - curr_med) / prev_med else 1
+          if (improvement < 0.01) {
+            state$stall_count <- state$stall_count + 1L
           } else {
-            state$n_failed <- state$n_failed + 1L
+            state$stall_count <- 0L
           }
+          cat(sprintf("  Improvement: %.1f%% (stall %d/3)\n", improvement * 100, state$stall_count))
+        }
+        if (state$stall_count >= 3 || gen >= input$max_generations) {
+          cat(sprintf("Stopping: stall=%d, gen=%d, max=%d\n",
+                      state$stall_count, gen, input$max_generations))
+          state$running <- FALSE
+          return()
+        }
+
+        # Prepare next generation
+        state$generation <- gen + 1L
+        state$particle_idx <- 0L
+        state$particles <- NULL
+        state$param_sds <- compute_param_sds(state$kept, input$perturbation_sd)
+        state$n_failed <- 0L
+        state$n_timeout <- 0L
+        state$n_attempts <- 0L
+        state$gen_start_time <- proc.time()[3]
+        return()  # yield, pick up next particle on next cycle
+      }
+
+      # --- Propose a particle ---
+      if (gen == 0 && is.null(state$kept)) {
+        proposed <- sample_prior_one()
+      } else {
+        kept <- state$kept
+        if (is.null(kept) || nrow(kept) == 0) {
+          state$running <- FALSE
+          return()
+        }
+        parent <- kept[sample.int(nrow(kept), 1), ..param_names]
+        proposed <- perturb_particle(parent, state$param_sds)
+      }
+
+      res <- tryCatch(
+        run_and_summarize_one(
+          proposed,
+          sim_gens    = get_clock()$sim_gens,
+          init_l      = input$init_l,
+          init_k0     = 10L,
+          sim_timeout = timeout,
+          target      = target,
+          mu_total    = get_clock()$mu_compressed,
+          fixed_vals  = state$fixed_vals
+        ),
+        error = function(e) {
+          cat("  Particle error:", conditionMessage(e), "\n")
+          list(stats = NULL, sim = NULL, elapsed = NA_real_)
+        }
+      )
+
+      state$last_particle_time <- res$elapsed
+      state$n_attempts <- state$n_attempts + 1L
+
+      timed_out <- is.null(res$stats) &&
+                   !is.null(res$elapsed) && !is.na(res$elapsed) &&
+                   res$elapsed >= (timeout - 0.5)
+
+      # Always advance — no retrying
+      state$particle_idx <- idx + 1L
+
+      if (is.null(res$stats)) {
+        if (isTRUE(timed_out)) {
+          state$n_timeout <- state$n_timeout + 1L
         } else {
-          d <- compute_distance(res$stats, target, state$stat_scales)
-          row <- cbind(proposed, res$stats, data.table(distance = d,
-            elapsed = res$elapsed, status = "ok"))
-          if (is.null(state$best_sim) || d < min(state$convergence$best, Inf)) {
-            if (!is.null(res$sim)) state$best_sim <- res$sim
-          }
-
-          if (is.null(state$particles)) {
-            state$particles <- row
-          } else {
-            state$particles <- rbind(state$particles, row, fill = TRUE)
-          }
+          state$n_failed <- state$n_failed + 1L
         }
-      }  # end batch while loop
+      } else {
+        d <- compute_distance(res$stats, target, state$stat_scales)
+        row <- cbind(proposed, res$stats, data.table(distance = d,
+          elapsed = res$elapsed, status = "ok"))
+        if (is.null(state$best_sim) || d < min(state$convergence$best, Inf)) {
+          if (!is.null(res$sim)) state$best_sim <- res$sim
+        }
+
+        if (is.null(state$particles)) {
+          state$particles <- row
+        } else {
+          state$particles <- rbind(state$particles, row, fill = TRUE)
+        }
+      }
     })
   })
 
