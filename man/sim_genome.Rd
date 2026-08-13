@@ -74,7 +74,7 @@ gamma(shape = 2, scale = 15).}
 total target size. Default 0.10.}
 
 \item{hard_caps}{Integer vector (length 1 or K) or NULL. Per-chromosome
-memory-guard cap. Default \code{2 * max(target_sizes)}.}
+memory-guard cap. Default \code{3 * max(target_sizes)}.}
 
 \item{init_l}{Integer. Monomer length in bp. Default 178.}
 

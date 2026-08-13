@@ -25,7 +25,7 @@
 #' @import ggplot2
 #' @importFrom parallel mclapply
 #' @importFrom Rcpp sourceCpp
-#' @importFrom stats rgamma rgeom rnorm rpois runif
+#' @importFrom stats rgamma rgeom rnorm rpois runif quantile
 #' @useDynLib reCYCLing, .registration = TRUE
 "_PACKAGE"
 
@@ -40,5 +40,7 @@ utils::globalVariables(c(
   "num", "num1", "num2",
   "pos", "pos1", "pos2", "pos_new", "pri", "prop",
   "sample1", "sample2", "symbol", "total",
-  "x", "xend", "y", "yend"
+  "x", "xend", "y", "yend",
+  "sid", "cidx", "is_x", "chrom_id", "aligned",
+  "Tot", "k", "between", "rows", "inverted"
 ))
