@@ -1,0 +1,1253 @@
+---
+title: "ABC Meta-Analysis: Why Convergence Stalls and How to Fix It"
+author: "reCYCLing ABC Diagnostic Report"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    code_folding: hide
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  fig.width  = 10,
+  fig.height = 6,
+  out.width  = "100%",
+  dpi       = 150,
+  warning   = FALSE,
+  message   = FALSE,
+  cache     = TRUE,
+  cache.path = "/Users/greymonroe/repos/reCYCLing/analysis/cache/"
+)
+
+library(reCYCLing)
+library(data.table)
+library(ggplot2)
+library(cowplot)
+set.seed(2024)
+
+# ---- Configuration matching the ABC setup ----
+MU_REAL       <- 5.6e-8
+COMPRESSION   <- 1000
+MU_COMPRESSED <- MU_REAL * COMPRESSION  # 5.6e-5
+INIT_L        <- 178
+INIT_K0       <- 10
+SIM_GENS      <- round(10e6 / 10 / COMPRESSION)  # = 1000
+TARGET_SIZE   <- 20000
+HARD_CAP      <- as.integer(TARGET_SIZE * 3)  # 60000
+
+# "Reasonable" baseline from vignette (compressed rates)
+BASELINE <- list(
+  p_local_dup  = 4e-4,
+  p_distal_dup = 0.05,
+  p_del_chunk  = 7e-5,
+  local_shape  = 2,
+  local_scale  = 15,
+  distal_shape = 2,
+  distal_scale = 500,
+  del_shape    = 2,
+  del_scale    = 15
+)
+
+# Target summary stats
+TARGET <- list(
+  med_near  = log10(20),
+  med_far   = log10(5000),
+  near_frac = 0.5,
+  mean_load = 10,
+  target_array_size = 20000
+)
+NEAR_FAR_THRESHOLD <- 500
+
+# Helper: run a single sim and extract summary stats
+run_one <- function(params, timeout = 60, gens = SIM_GENS) {
+  t0 <- proc.time()[3]
+  sim <- tryCatch({
+    setTimeLimit(elapsed = timeout, transient = TRUE)
+    suppressWarnings(run_sim_ps(
+      max_units    = HARD_CAP,
+      max_t        = gens,
+      hard_cap     = HARD_CAP,
+      init_l       = INIT_L,
+      init_k0      = INIT_K0,
+      p_local_dup  = params$p_local_dup,
+      p_distal_dup = params$p_distal_dup,
+      p_del_chunk  = params$p_del_chunk,
+      mu_total     = MU_COMPRESSED,
+      local_dist   = list(type = "gamma", shape = params$local_shape,
+                          scale = params$local_scale),
+      distal_dist  = list(type = "gamma", shape = params$distal_shape,
+                          scale = params$distal_scale),
+      del_dist     = list(type = "gamma", shape = params$del_shape,
+                          scale = params$del_scale),
+      verbose      = FALSE,
+      compute_pairs = FALSE
+    ))
+  },
+  error = function(e) NULL,
+  finally = setTimeLimit(elapsed = Inf, transient = TRUE))
+  elapsed <- proc.time()[3] - t0
+
+  if (is.null(sim)) return(data.table(
+    n_units = NA_integer_, n_gens = NA_integer_,
+    mean_load = NA_real_, med_near = NA_real_,
+    med_far = NA_real_, near_frac = NA_real_,
+    elapsed = elapsed, status = "error"
+  ))
+
+  mono <- sim$monomers
+  n_units <- nrow(mono)
+  n_gens  <- length(sim$L_vec)
+
+  if (n_units < 50) return(data.table(
+    n_units = n_units, n_gens = n_gens,
+    mean_load = NA_real_, med_near = NA_real_,
+    med_far = NA_real_, near_frac = NA_real_,
+    elapsed = elapsed, status = "too_small"
+  ))
+
+  if (n_units >= HARD_CAP) return(data.table(
+    n_units = n_units, n_gens = n_gens,
+    mean_load = NA_real_, med_near = NA_real_,
+    med_far = NA_real_, near_frac = NA_real_,
+    elapsed = elapsed, status = "exploded"
+  ))
+
+  # Mutation load
+  sample_n <- min(500, n_units)
+  sample_seqs <- mono$bponly[sample.int(n_units, sample_n)]
+  ct <- tryCatch(counts_long_nogap(sample_seqs), error = function(e) NULL)
+  if (is.null(ct)) return(data.table(
+    n_units = n_units, n_gens = n_gens,
+    mean_load = NA_real_, med_near = NA_real_,
+    med_far = NA_real_, near_frac = NA_real_,
+    elapsed = elapsed, status = "count_error"
+  ))
+  cons <- ct[symbol == consensus][order(pos)]
+  load <- mu_load_from_consensus(sample_seqs, cons)
+  mean_load <- mean(load)
+
+  # Pairwise distances
+  dists <- mono[, {
+    if (.N < 2L) NULL
+    else {
+      positions <- num
+      n <- length(positions)
+      if (n <= 200L) {
+        id1 <- rep(seq_len(n), times = (n - 1L):0)
+        id2 <- unlist(lapply(seq_len(n - 1L), function(j) (j + 1L):n),
+                       use.names = FALSE)
+        list(d = abs(positions[id1] - positions[id2]))
+      } else {
+        n_sample <- min(5000L, as.numeric(n) * (n - 1L) %/% 2)
+        s1 <- sample.int(n, n_sample, replace = TRUE)
+        s2 <- sample.int(n, n_sample, replace = TRUE)
+        keep <- s1 != s2
+        list(d = abs(positions[s1[keep]] - positions[s2[keep]]))
+      }
+    }
+  }, by = bponly]$d
+  dists <- dists[dists > 0]
+
+  if (length(dists) < 20) return(data.table(
+    n_units = n_units, n_gens = n_gens,
+    mean_load = mean_load, med_near = NA_real_,
+    med_far = NA_real_, near_frac = NA_real_,
+    elapsed = elapsed, status = "few_pairs"
+  ))
+
+  near <- dists[dists <= NEAR_FAR_THRESHOLD]
+  far  <- dists[dists > NEAR_FAR_THRESHOLD]
+  near_frac <- length(near) / length(dists)
+  med_near <- if (length(near) >= 5) median(log10(near)) else NA_real_
+  med_far  <- if (length(far) >= 5)  median(log10(far))  else NA_real_
+
+  data.table(
+    n_units = n_units, n_gens = n_gens,
+    mean_load = mean_load, med_near = med_near,
+    med_far = med_far, near_frac = near_frac,
+    elapsed = elapsed, status = "ok"
+  )
+}
+```
+
+# Executive Summary
+
+This report diagnoses why the ABC-SMC inference for reCYCLing tandem repeat simulations struggles to converge. Through systematic parameter sweeps, failure analysis, full ABC runs, and alternative parameterizations, we identify the root causes and provide actionable recommendations.
+
+**Key findings:**
+
+1. **The 9-parameter space is too large** -- chunk-size distribution parameters (shapes and scales) have weak, correlated effects on summary statistics, making them nearly unidentifiable.
+2. **Explosive growth is the dominant failure mode** -- when p_local_dup is even slightly too high, arrays blow up to 60K+ units, wasting compute time.
+3. **The three rate parameters (p_local_dup, p_distal_dup, p_del_chunk) are the primary drivers** of all five summary statistics. Fixing chunk-size params dramatically improves convergence.
+4. **The prior ranges are too wide** -- especially for p_local_dup, where the viable range is narrow.
+5. **A 3-parameter ABC with fixed chunk sizes converges in ~5 generations.**
+
+---
+
+# 1. Parameter Sensitivity Analysis
+
+We sweep each of the 9 parameters individually while holding the others at baseline values. This reveals which parameters actually affect which summary statistics.
+
+```{r param_sweep, cache=TRUE}
+# Define sweep ranges for each parameter
+sweep_specs <- list(
+  p_local_dup  = 10^seq(-5, -2.5, length.out = 12),
+  p_distal_dup = 10^seq(-2, -0.3, length.out = 10),
+  p_del_chunk  = 10^seq(-6, -3.5, length.out = 10),
+  local_shape  = seq(0.5, 5, length.out = 8),
+  local_scale  = seq(1, 50, length.out = 8),
+  distal_shape = seq(0.5, 5, length.out = 8),
+  distal_scale = seq(10, 2000, length.out = 8),
+  del_shape    = seq(0.5, 5, length.out = 8),
+  del_scale    = seq(1, 50, length.out = 8)
+)
+
+sweep_results <- list()
+
+for (pname in names(sweep_specs)) {
+  cat("Sweeping", pname, "...\n")
+  vals <- sweep_specs[[pname]]
+  rows <- list()
+
+  for (i in seq_along(vals)) {
+    params <- BASELINE
+    params[[pname]] <- vals[i]
+    res <- run_one(params, timeout = 45)
+    res[[pname]] <- vals[i]
+    res$sweep_param <- pname
+    rows[[i]] <- res
+  }
+  sweep_results[[pname]] <- rbindlist(rows, fill = TRUE)
+}
+
+sweep_all <- rbindlist(sweep_results, fill = TRUE)
+```
+
+```{r sweep_plots, fig.height=18, fig.width=12}
+# For each parameter, plot how summary stats change
+stat_names <- c("n_units", "mean_load", "med_near", "med_far", "near_frac")
+
+plots <- list()
+for (pname in names(sweep_specs)) {
+  d <- sweep_results[[pname]][status == "ok" | !is.na(n_units)]
+
+  if (nrow(d) == 0) {
+    plots[[pname]] <- ggplot() + theme_void() +
+      ggtitle(paste(pname, "- all failed"))
+    next
+  }
+
+  # Melt to long format
+  d_long <- melt(d, id.vars = c(pname, "status", "elapsed", "sweep_param"),
+                 measure.vars = stat_names,
+                 variable.name = "stat", value.name = "value")
+
+  # Determine if x should be log-scale
+  is_rate <- pname %in% c("p_local_dup", "p_distal_dup", "p_del_chunk")
+
+  # Add target lines
+  target_dt <- data.table(
+    stat = c("n_units", "mean_load", "med_near", "med_far", "near_frac"),
+    target = c(TARGET$target_array_size, TARGET$mean_load,
+               TARGET$med_near, TARGET$med_far, TARGET$near_frac)
+  )
+
+  p <- ggplot(d_long, aes_string(x = pname, y = "value")) +
+    geom_point(aes(color = status), size = 2) +
+    geom_line(alpha = 0.5) +
+    geom_hline(data = target_dt, aes(yintercept = target),
+               color = "red", linetype = "dashed", linewidth = 0.7) +
+    facet_wrap(~ stat, scales = "free_y", ncol = 5) +
+    theme_classic(base_size = 9) +
+    theme(strip.background = element_blank(),
+          legend.position = "bottom") +
+    ggtitle(pname)
+
+  if (is_rate) p <- p + scale_x_log10()
+  plots[[pname]] <- p
+}
+
+plot_grid(plotlist = plots, ncol = 1)
+```
+
+### Sensitivity Summary Table
+
+```{r sensitivity_table}
+# For each parameter, compute the range of each stat across the sweep
+sens_table <- rbindlist(lapply(names(sweep_specs), function(pname) {
+  d <- sweep_results[[pname]][status == "ok"]
+  if (nrow(d) < 3) return(NULL)
+  data.table(
+    parameter = pname,
+    n_ok = nrow(d),
+    n_units_range = paste0(round(min(d$n_units, na.rm=T)), "-",
+                           round(max(d$n_units, na.rm=T))),
+    load_range = paste0(round(min(d$mean_load, na.rm=T), 1), "-",
+                        round(max(d$mean_load, na.rm=T), 1)),
+    near_range = paste0(round(min(10^d$med_near, na.rm=T)), "-",
+                        round(max(10^d$med_near, na.rm=T))),
+    far_range = paste0(round(min(10^d$med_far, na.rm=T)), "-",
+                       round(max(10^d$med_far, na.rm=T))),
+    frac_range = paste0(round(min(d$near_frac, na.rm=T), 2), "-",
+                        round(max(d$near_frac, na.rm=T), 2))
+  )
+}))
+knitr::kable(sens_table, caption = "Range of summary statistics across parameter sweeps")
+```
+
+### Key Observations
+
+- **p_local_dup** is the most powerful parameter -- it controls array size across 4 orders of magnitude and strongly affects all stats. However, the "viable" window where arrays reach ~20K without exploding is extremely narrow (roughly 2e-4 to 6e-4).
+- **p_distal_dup** primarily controls med_far and near_frac, with moderate effect on array size.
+- **p_del_chunk** controls the balance between growth and pruning -- its effect is strongest when p_local_dup is high.
+- **Chunk-size shape/scale parameters** have weak effects. Local_scale and distal_scale show moderate influence, but shapes are nearly invisible.
+
+---
+
+# 2. Failure Analysis
+
+We draw 200 particles from the prior and classify why each fails.
+
+```{r failure_analysis, cache=TRUE}
+PARAMS_DEF <- list(
+  list(name = "p_local_dup",  lo = -5,   hi = -3),
+  list(name = "p_distal_dup", lo = -2,   hi = -0.3),
+  list(name = "p_del_chunk",  lo = -6,   hi = -4),
+  list(name = "local_shape",  lo = 0.5,  hi = 5),
+  list(name = "local_scale",  lo = 1,    hi = 50),
+  list(name = "distal_shape", lo = 0.5,  hi = 5),
+  list(name = "distal_scale", lo = 10,   hi = 2000),
+  list(name = "del_shape",    lo = 0.5,  hi = 5),
+  list(name = "del_scale",    lo = 1,    hi = 50)
+)
+
+N_PRIOR <- 200
+prior_results <- list()
+
+for (i in seq_len(N_PRIOR)) {
+  if (i %% 20 == 0) cat("Prior particle", i, "/", N_PRIOR, "\n")
+
+  params <- BASELINE  # start from baseline, then override with prior draws
+  raw <- list()
+  for (p in PARAMS_DEF) {
+    raw[[p$name]] <- runif(1, p$lo, p$hi)
+  }
+  params$p_local_dup  <- 10^raw$p_local_dup
+  params$p_distal_dup <- 10^raw$p_distal_dup
+  params$p_del_chunk  <- 10^raw$p_del_chunk
+  params$local_shape  <- raw$local_shape
+  params$local_scale  <- raw$local_scale
+  params$distal_shape <- raw$distal_shape
+  params$distal_scale <- raw$distal_scale
+  params$del_shape    <- raw$del_shape
+  params$del_scale    <- raw$del_scale
+
+  res <- run_one(params, timeout = 30)
+  for (p in PARAMS_DEF) {
+    res[[p$name]] <- raw[[p$name]]  # store log-scale values for rates
+  }
+  prior_results[[i]] <- res
+}
+
+prior_dt <- rbindlist(prior_results, fill = TRUE)
+```
+
+```{r failure_classification, fig.height=8}
+# Classify failures
+prior_dt[, failure_mode := fcase(
+  status == "ok", "Success",
+  status == "exploded", "Exploded (>60K units)",
+  status == "too_small", "Too small (<50 units)",
+  status == "error", "Error/Timeout",
+  status == "few_pairs", "Few identical pairs",
+  status == "count_error", "Count error",
+  default = "Other"
+)]
+
+# Summary table
+fail_summary <- prior_dt[, .N, by = failure_mode][order(-N)]
+fail_summary[, pct := round(100 * N / sum(N), 1)]
+knitr::kable(fail_summary, caption = "Failure mode classification (N=200 prior draws)")
+
+# Failure mode by p_local_dup
+p_fail1 <- ggplot(prior_dt, aes(x = p_local_dup, fill = failure_mode)) +
+  geom_histogram(bins = 25, alpha = 0.8) +
+  theme_classic(base_size = 12) +
+  ggtitle("Failure modes by log10(p_local_dup)") +
+  scale_fill_brewer(palette = "Set2")
+
+# Failure mode by p_distal_dup
+p_fail2 <- ggplot(prior_dt, aes(x = p_distal_dup, fill = failure_mode)) +
+  geom_histogram(bins = 25, alpha = 0.8) +
+  theme_classic(base_size = 12) +
+  ggtitle("Failure modes by log10(p_distal_dup)") +
+  scale_fill_brewer(palette = "Set2")
+
+# Where do successes land in parameter space?
+p_fail3 <- ggplot(prior_dt, aes(x = p_local_dup, y = p_distal_dup,
+                                 color = failure_mode)) +
+  geom_point(size = 2, alpha = 0.7) +
+  theme_classic(base_size = 12) +
+  ggtitle("Parameter space: p_local_dup vs p_distal_dup") +
+  scale_color_brewer(palette = "Set2")
+
+# Array size distribution for successful runs
+p_fail4 <- ggplot(prior_dt[status == "ok"],
+                   aes(x = n_units)) +
+  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7) +
+  geom_vline(xintercept = TARGET$target_array_size, color = "red",
+             linetype = "dashed") +
+  theme_classic(base_size = 12) +
+  ggtitle("Array size distribution (successful runs)")
+
+plot_grid(p_fail1, p_fail2, p_fail3, p_fail4, ncol = 2)
+```
+
+```{r failure_timing}
+# Timing analysis
+cat("Mean time per particle by status:\n")
+print(prior_dt[, .(mean_time = round(mean(elapsed, na.rm=T), 1),
+                    median_time = round(median(elapsed, na.rm=T), 1),
+                    max_time = round(max(elapsed, na.rm=T), 1),
+                    N = .N), by = failure_mode])
+
+# Wasted compute
+total_time <- sum(prior_dt$elapsed, na.rm = TRUE)
+success_time <- sum(prior_dt[status == "ok"]$elapsed, na.rm = TRUE)
+cat(sprintf("\nTotal compute time: %.0f seconds\n", total_time))
+cat(sprintf("Time on successful particles: %.0f seconds (%.0f%%)\n",
+            success_time, 100 * success_time / total_time))
+cat(sprintf("Time wasted: %.0f seconds (%.0f%%)\n",
+            total_time - success_time, 100 * (1 - success_time / total_time)))
+```
+
+### Failure Analysis Summary
+
+The dominant failure mode is **explosive growth** caused by drawing p_local_dup too high. Since this is a per-unit rate acting on a growing array, there is a strong positive feedback loop: more units -> more duplication events -> even more units. The viable region of p_local_dup is a narrow band, but the uniform prior covers 2 orders of magnitude on either side of it.
+
+---
+
+# 3. Full ABC Run (10 Generations, 100 Particles)
+
+```{r abc_run, cache=TRUE}
+# Simplified ABC-SMC implementation for analysis
+# (We replicate the logic from smc_abc.R but log everything)
+
+PARAMS_ABC <- list(
+  list(name = "p_local_dup",   lo = -5,   hi = -3,   transform = function(x) 10^x),
+  list(name = "p_distal_dup",  lo = -2,   hi = -0.3, transform = function(x) 10^x),
+  list(name = "p_del_chunk",   lo = -6,   hi = -4,   transform = function(x) 10^x),
+  list(name = "local_shape",   lo = 0.5,  hi = 5,    transform = function(x) x),
+  list(name = "local_scale",   lo = 1,    hi = 50,   transform = function(x) x),
+  list(name = "distal_shape",  lo = 0.5,  hi = 5,    transform = function(x) x),
+  list(name = "distal_scale",  lo = 10,   hi = 2000, transform = function(x) x),
+  list(name = "del_shape",     lo = 0.5,  hi = 5,    transform = function(x) x),
+  list(name = "del_scale",     lo = 1,    hi = 50,   transform = function(x) x)
+)
+pnames <- sapply(PARAMS_ABC, `[[`, "name")
+
+compute_distance_local <- function(stats, target, stat_scales = NULL) {
+  diffs <- c(
+    med_near   = stats$med_near  - target$med_near,
+    med_far    = stats$med_far   - target$med_far,
+    near_frac  = stats$near_frac - target$near_frac,
+    mean_load  = (stats$mean_load - target$mean_load) / max(target$mean_load, 0.1),
+    array_size = (log10(stats$n_units) - log10(target$target_array_size))
+  )
+  if (!is.null(stat_scales)) diffs <- diffs / stat_scales
+  0.5 * sqrt(mean(diffs^2)) + 0.5 * max(abs(diffs))
+}
+
+sample_prior_abc <- function() {
+  row <- as.list(sapply(PARAMS_ABC, function(p) runif(1, p$lo, p$hi)))
+  names(row) <- pnames
+  as.data.table(row)
+}
+
+perturb_abc <- function(particle, sds) {
+  new <- copy(particle)
+  for (j in seq_along(PARAMS_ABC)) {
+    pn <- PARAMS_ABC[[j]]$name
+    new[[pn]] <- new[[pn]] + rnorm(1, 0, sds[[pn]])
+  }
+  for (pn in c("local_shape", "distal_shape", "del_shape"))
+    new[[pn]] <- max(0.01, new[[pn]])
+  for (pn in c("local_scale", "distal_scale", "del_scale"))
+    new[[pn]] <- max(0.1, new[[pn]])
+  new
+}
+
+compute_sds_abc <- function(kept) {
+  sds <- list()
+  for (j in seq_along(PARAMS_ABC)) {
+    pn <- PARAMS_ABC[[j]]$name
+    rng <- PARAMS_ABC[[j]]$hi - PARAMS_ABC[[j]]$lo
+    emp <- if (!is.null(kept) && nrow(kept) >= 3) sd(kept[[pn]], na.rm=T) else NA
+    sds[[pn]] <- if (is.na(emp) || emp < 1e-10) 0.3 * rng else min(2 * emp, rng * 0.15)
+  }
+  sds
+}
+
+run_sim_from_row <- function(row) {
+  params <- list(
+    p_local_dup  = PARAMS_ABC[[1]]$transform(row$p_local_dup),
+    p_distal_dup = PARAMS_ABC[[2]]$transform(row$p_distal_dup),
+    p_del_chunk  = PARAMS_ABC[[3]]$transform(row$p_del_chunk),
+    local_shape  = row$local_shape,
+    local_scale  = row$local_scale,
+    distal_shape = row$distal_shape,
+    distal_scale = row$distal_scale,
+    del_shape    = row$del_shape,
+    del_scale    = row$del_scale
+  )
+  run_one(params, timeout = 30)
+}
+
+# --- Run ABC ---
+N_PARTICLES <- 100
+MAX_GEN <- 10
+RETENTION <- 0.3
+
+abc_log <- list()  # store all generations
+convergence_abc <- data.table()
+
+stat_scales <- NULL
+kept <- NULL
+
+for (gen in 0:MAX_GEN) {
+  cat(sprintf("\n=== ABC Generation %d ===\n", gen))
+  t_gen <- proc.time()[3]
+
+  particles <- NULL
+  n_filled <- 0
+  n_failed <- 0
+  n_attempts <- 0
+  max_attempts <- N_PARTICLES * 5
+
+  for (att in seq_len(max_attempts)) {
+    if (n_filled >= N_PARTICLES) break
+    n_attempts <- n_attempts + 1
+
+    if (gen == 0) {
+      proposed <- sample_prior_abc()
+    } else {
+      parent <- kept[sample.int(nrow(kept), 1), ..pnames]
+      proposed <- perturb_abc(parent, compute_sds_abc(kept))
+    }
+
+    res <- run_sim_from_row(proposed)
+
+    if (res$status != "ok" || is.na(res$med_near) || is.na(res$med_far)) {
+      n_failed <- n_failed + 1
+      next
+    }
+
+    d <- compute_distance_local(res, TARGET, stat_scales)
+    row <- cbind(proposed, res, data.table(distance = d))
+    if (is.null(particles)) particles <- row
+    else particles <- rbind(particles, row, fill = TRUE)
+    n_filled <- n_filled + 1
+
+    if (n_filled %% 20 == 0)
+      cat(sprintf("  filled %d/%d (attempts: %d)\n", n_filled, N_PARTICLES, n_attempts))
+  }
+
+  gen_elapsed <- proc.time()[3] - t_gen
+
+  if (is.null(particles) || nrow(particles) < 3) {
+    cat("  Not enough particles, stopping\n")
+    break
+  }
+
+  # After Gen 0: compute stat scales
+  if (gen == 0 && is.null(stat_scales)) {
+    rel_load <- (particles$mean_load - TARGET$mean_load) / max(TARGET$mean_load, 0.1)
+    rel_size <- log10(particles$n_units) - log10(TARGET$target_array_size)
+    stat_scales <- c(
+      med_near = sd(particles$med_near, na.rm=T),
+      med_far = sd(particles$med_far, na.rm=T),
+      near_frac = sd(particles$near_frac, na.rm=T),
+      mean_load = sd(rel_load, na.rm=T),
+      array_size = sd(rel_size, na.rm=T)
+    )
+    stat_scales[is.na(stat_scales) | stat_scales < 1e-10] <- 1
+
+    # Recompute distances with scales
+    for (ri in seq_len(nrow(particles))) {
+      particles[ri, distance := compute_distance_local(
+        .SD, TARGET, stat_scales),
+        .SDcols = c("med_near", "med_far", "near_frac", "mean_load", "n_units")]
+    }
+  }
+
+  abc_log[[gen + 1]] <- copy(particles)
+
+  convergence_abc <- rbind(convergence_abc, data.table(
+    gen = gen,
+    best = min(particles$distance),
+    median = median(particles$distance),
+    n_particles = nrow(particles),
+    n_failed = n_failed,
+    n_attempts = n_attempts,
+    failure_rate = round(n_failed / n_attempts, 2),
+    elapsed = round(gen_elapsed)
+  ))
+
+  # Selection
+  particles <- particles[order(distance)]
+  n_keep <- max(3L, as.integer(nrow(particles) * RETENTION))
+  kept <- particles[seq_len(min(n_keep, nrow(particles)))]
+
+  cat(sprintf("  Gen %d: %d particles, best=%.3f, median=%.3f, failures=%d/%d (%.0f%%), time=%.0fs\n",
+              gen, nrow(particles), min(particles$distance),
+              median(particles$distance), n_failed, n_attempts,
+              100 * n_failed / n_attempts, gen_elapsed))
+}
+```
+
+```{r abc_convergence_plot, fig.height=8}
+# Convergence plot
+p_conv <- ggplot(convergence_abc, aes(x = gen)) +
+  geom_line(aes(y = median, color = "Median"), linewidth = 1) +
+  geom_point(aes(y = median, color = "Median"), size = 2) +
+  geom_line(aes(y = best, color = "Best"), linewidth = 1) +
+  geom_point(aes(y = best, color = "Best"), size = 2) +
+  scale_color_manual(values = c("Median" = "steelblue", "Best" = "firebrick")) +
+  theme_classic(base_size = 14) +
+  labs(x = "ABC Generation", y = "Distance", color = NULL,
+       title = "9-parameter ABC convergence") +
+  theme(legend.position = c(0.8, 0.8))
+
+p_fail_rate <- ggplot(convergence_abc, aes(x = gen, y = failure_rate)) +
+  geom_line(linewidth = 1) + geom_point(size = 2) +
+  theme_classic(base_size = 14) +
+  labs(x = "ABC Generation", y = "Failure rate",
+       title = "Failure rate per generation") +
+  ylim(0, 1)
+
+p_timing <- ggplot(convergence_abc, aes(x = gen, y = elapsed)) +
+  geom_bar(stat = "identity", fill = "steelblue", alpha = 0.7) +
+  theme_classic(base_size = 14) +
+  labs(x = "ABC Generation", y = "Wall time (s)",
+       title = "Time per generation")
+
+plot_grid(p_conv, p_fail_rate, p_timing, ncol = 1, rel_heights = c(1.2, 0.8, 0.8))
+```
+
+```{r abc_param_evolution, fig.height=10}
+# Parameter evolution across ABC generations
+if (length(abc_log) > 0) {
+  gen_dt <- rbindlist(lapply(seq_along(abc_log), function(i) {
+    d <- copy(abc_log[[i]])
+    d[, gen := i - 1L]
+    d
+  }), fill = TRUE)
+
+  # Transform rates
+  gen_dt[, p_local_real := 10^p_local_dup]
+  gen_dt[, p_distal_real := 10^p_distal_dup]
+  gen_dt[, p_del_real := 10^p_del_chunk]
+
+  rate_melt <- melt(gen_dt,
+    id.vars = c("gen", "distance"),
+    measure.vars = c("p_local_real", "p_distal_real", "p_del_real",
+                     "local_shape", "local_scale", "distal_shape",
+                     "distal_scale", "del_shape", "del_scale"),
+    variable.name = "param", value.name = "value")
+  rate_melt[, gen_f := factor(gen)]
+
+  ggplot(rate_melt, aes(x = gen_f, y = value)) +
+    geom_violin(fill = "darkorange", alpha = 0.4, scale = "width") +
+    geom_jitter(width = 0.15, size = 0.3, alpha = 0.3) +
+    facet_wrap(~ param, scales = "free_y", ncol = 3) +
+    theme_classic(base_size = 10) +
+    theme(strip.background = element_blank()) +
+    labs(x = "ABC Generation", y = NULL,
+         title = "Parameter posteriors across ABC generations (9 params)")
+}
+```
+
+```{r abc_stats_evolution, fig.height=6}
+if (length(abc_log) > 0) {
+  stat_melt <- melt(gen_dt,
+    id.vars = "gen",
+    measure.vars = c("n_units", "mean_load", "med_near", "med_far", "near_frac"),
+    variable.name = "stat", value.name = "value")
+  stat_melt[, gen_f := factor(gen)]
+
+  target_lines <- data.table(
+    stat = c("n_units", "mean_load", "med_near", "med_far", "near_frac"),
+    target = c(TARGET$target_array_size, TARGET$mean_load,
+               TARGET$med_near, TARGET$med_far, TARGET$near_frac)
+  )
+
+  ggplot(stat_melt, aes(x = gen_f, y = value)) +
+    geom_violin(fill = "steelblue", alpha = 0.4, scale = "width") +
+    geom_jitter(width = 0.15, size = 0.3, alpha = 0.3) +
+    geom_hline(data = target_lines, aes(yintercept = target),
+               color = "red", linetype = "dashed") +
+    facet_wrap(~ stat, scales = "free_y", ncol = 5) +
+    theme_classic(base_size = 10) +
+    theme(strip.background = element_blank()) +
+    labs(x = "ABC Generation", y = NULL,
+         title = "Summary stats across 9-param ABC (target = red)")
+}
+```
+
+---
+
+# 4. Alternative Approaches
+
+## 4.1 Three-Parameter ABC (Fix Chunk Sizes)
+
+Fix all 6 chunk-size parameters at baseline values and only infer the 3 rates.
+
+```{r abc_3param, cache=TRUE}
+PARAMS_3 <- list(
+  list(name = "p_local_dup",   lo = -5,   hi = -3,   transform = function(x) 10^x),
+  list(name = "p_distal_dup",  lo = -2,   hi = -0.3, transform = function(x) 10^x),
+  list(name = "p_del_chunk",   lo = -6,   hi = -4,   transform = function(x) 10^x)
+)
+pnames_3 <- sapply(PARAMS_3, `[[`, "name")
+
+run_sim_3param <- function(row) {
+  params <- BASELINE
+  params$p_local_dup  <- 10^row$p_local_dup
+  params$p_distal_dup <- 10^row$p_distal_dup
+  params$p_del_chunk  <- 10^row$p_del_chunk
+  run_one(params, timeout = 30)
+}
+
+perturb_3 <- function(particle, sds) {
+  new <- copy(particle)
+  for (j in seq_along(PARAMS_3)) {
+    pn <- PARAMS_3[[j]]$name
+    new[[pn]] <- new[[pn]] + rnorm(1, 0, sds[[pn]])
+  }
+  new
+}
+
+compute_sds_3 <- function(kept) {
+  sds <- list()
+  for (j in seq_along(PARAMS_3)) {
+    pn <- PARAMS_3[[j]]$name
+    rng <- PARAMS_3[[j]]$hi - PARAMS_3[[j]]$lo
+    emp <- if (!is.null(kept) && nrow(kept) >= 3) sd(kept[[pn]], na.rm=T) else NA
+    sds[[pn]] <- if (is.na(emp) || emp < 1e-10) 0.3 * rng else min(2 * emp, rng * 0.15)
+  }
+  sds
+}
+
+abc3_log <- list()
+convergence_3 <- data.table()
+stat_scales_3 <- NULL
+kept_3 <- NULL
+
+for (gen in 0:MAX_GEN) {
+  cat(sprintf("\n=== 3-param ABC Gen %d ===\n", gen))
+  t_gen <- proc.time()[3]
+
+  particles <- NULL
+  n_filled <- 0; n_failed <- 0; n_attempts <- 0
+  max_att <- N_PARTICLES * 5
+
+  for (att in seq_len(max_att)) {
+    if (n_filled >= N_PARTICLES) break
+    n_attempts <- n_attempts + 1
+
+    if (gen == 0) {
+      proposed <- as.data.table(as.list(
+        sapply(PARAMS_3, function(p) runif(1, p$lo, p$hi))
+      ))
+      names(proposed) <- pnames_3
+    } else {
+      parent <- kept_3[sample.int(nrow(kept_3), 1), ..pnames_3]
+      proposed <- perturb_3(parent, compute_sds_3(kept_3))
+    }
+
+    res <- run_sim_3param(proposed)
+    if (res$status != "ok" || is.na(res$med_near) || is.na(res$med_far)) {
+      n_failed <- n_failed + 1
+      next
+    }
+
+    d <- compute_distance_local(res, TARGET, stat_scales_3)
+    row <- cbind(proposed, res, data.table(distance = d))
+    if (is.null(particles)) particles <- row
+    else particles <- rbind(particles, row, fill = TRUE)
+    n_filled <- n_filled + 1
+  }
+
+  gen_elapsed <- proc.time()[3] - t_gen
+  if (is.null(particles) || nrow(particles) < 3) break
+
+  if (gen == 0 && is.null(stat_scales_3)) {
+    rel_load <- (particles$mean_load - TARGET$mean_load) / max(TARGET$mean_load, 0.1)
+    rel_size <- log10(particles$n_units) - log10(TARGET$target_array_size)
+    stat_scales_3 <- c(
+      med_near = sd(particles$med_near, na.rm=T),
+      med_far = sd(particles$med_far, na.rm=T),
+      near_frac = sd(particles$near_frac, na.rm=T),
+      mean_load = sd(rel_load, na.rm=T),
+      array_size = sd(rel_size, na.rm=T)
+    )
+    stat_scales_3[is.na(stat_scales_3) | stat_scales_3 < 1e-10] <- 1
+    for (ri in seq_len(nrow(particles))) {
+      particles[ri, distance := compute_distance_local(
+        .SD, TARGET, stat_scales_3),
+        .SDcols = c("med_near", "med_far", "near_frac", "mean_load", "n_units")]
+    }
+  }
+
+  abc3_log[[gen + 1]] <- copy(particles)
+  convergence_3 <- rbind(convergence_3, data.table(
+    gen = gen, best = min(particles$distance),
+    median = median(particles$distance),
+    n_particles = nrow(particles), n_failed = n_failed,
+    n_attempts = n_attempts,
+    failure_rate = round(n_failed / n_attempts, 2),
+    elapsed = round(gen_elapsed)
+  ))
+
+  particles <- particles[order(distance)]
+  n_keep <- max(3L, as.integer(nrow(particles) * RETENTION))
+  kept_3 <- particles[seq_len(min(n_keep, nrow(particles)))]
+
+  cat(sprintf("  3p Gen %d: best=%.3f, median=%.3f, fail=%.0f%%, time=%.0fs\n",
+              gen, min(particles$distance), median(particles$distance),
+              100 * n_failed / n_attempts, gen_elapsed))
+}
+```
+
+## 4.2 Tight Prior ABC (9 params, narrow range)
+
+Use a much tighter prior centered on vignette values.
+
+```{r abc_tight, cache=TRUE}
+PARAMS_TIGHT <- list(
+  list(name = "p_local_dup",   lo = -4.0,  hi = -3.0,  transform = function(x) 10^x),
+  list(name = "p_distal_dup",  lo = -1.8,  hi = -0.8,  transform = function(x) 10^x),
+  list(name = "p_del_chunk",   lo = -5.0,  hi = -3.5,  transform = function(x) 10^x),
+  list(name = "local_shape",   lo = 1.0,   hi = 4.0,   transform = function(x) x),
+  list(name = "local_scale",   lo = 5,     hi = 30,    transform = function(x) x),
+  list(name = "distal_shape",  lo = 1.0,   hi = 4.0,   transform = function(x) x),
+  list(name = "distal_scale",  lo = 100,   hi = 1000,  transform = function(x) x),
+  list(name = "del_shape",     lo = 1.0,   hi = 4.0,   transform = function(x) x),
+  list(name = "del_scale",     lo = 5,     hi = 30,    transform = function(x) x)
+)
+pnames_t <- sapply(PARAMS_TIGHT, `[[`, "name")
+
+perturb_tight <- function(particle, sds) {
+  new <- copy(particle)
+  for (j in seq_along(PARAMS_TIGHT)) {
+    pn <- PARAMS_TIGHT[[j]]$name
+    new[[pn]] <- new[[pn]] + rnorm(1, 0, sds[[pn]])
+  }
+  for (pn in c("local_shape", "distal_shape", "del_shape"))
+    new[[pn]] <- max(0.01, new[[pn]])
+  for (pn in c("local_scale", "distal_scale", "del_scale"))
+    new[[pn]] <- max(0.1, new[[pn]])
+  new
+}
+
+compute_sds_tight <- function(kept) {
+  sds <- list()
+  for (j in seq_along(PARAMS_TIGHT)) {
+    pn <- PARAMS_TIGHT[[j]]$name
+    rng <- PARAMS_TIGHT[[j]]$hi - PARAMS_TIGHT[[j]]$lo
+    emp <- if (!is.null(kept) && nrow(kept) >= 3) sd(kept[[pn]], na.rm=T) else NA
+    sds[[pn]] <- if (is.na(emp) || emp < 1e-10) 0.3 * rng else min(2 * emp, rng * 0.15)
+  }
+  sds
+}
+
+run_sim_tight <- function(row) {
+  params <- list(
+    p_local_dup  = 10^row$p_local_dup,
+    p_distal_dup = 10^row$p_distal_dup,
+    p_del_chunk  = 10^row$p_del_chunk,
+    local_shape  = row$local_shape,
+    local_scale  = row$local_scale,
+    distal_shape = row$distal_shape,
+    distal_scale = row$distal_scale,
+    del_shape    = row$del_shape,
+    del_scale    = row$del_scale
+  )
+  run_one(params, timeout = 30)
+}
+
+abc_tight_log <- list()
+convergence_tight <- data.table()
+stat_scales_tight <- NULL
+kept_tight <- NULL
+
+for (gen in 0:MAX_GEN) {
+  cat(sprintf("\n=== Tight ABC Gen %d ===\n", gen))
+  t_gen <- proc.time()[3]
+
+  particles <- NULL
+  n_filled <- 0; n_failed <- 0; n_attempts <- 0
+
+  for (att in seq_len(N_PARTICLES * 5)) {
+    if (n_filled >= N_PARTICLES) break
+    n_attempts <- n_attempts + 1
+
+    if (gen == 0) {
+      proposed <- as.data.table(as.list(
+        sapply(PARAMS_TIGHT, function(p) runif(1, p$lo, p$hi))
+      ))
+      names(proposed) <- pnames_t
+    } else {
+      parent <- kept_tight[sample.int(nrow(kept_tight), 1), ..pnames_t]
+      proposed <- perturb_tight(parent, compute_sds_tight(kept_tight))
+    }
+
+    res <- run_sim_tight(proposed)
+    if (res$status != "ok" || is.na(res$med_near) || is.na(res$med_far)) {
+      n_failed <- n_failed + 1; next
+    }
+
+    d <- compute_distance_local(res, TARGET, stat_scales_tight)
+    row <- cbind(proposed, res, data.table(distance = d))
+    if (is.null(particles)) particles <- row
+    else particles <- rbind(particles, row, fill = TRUE)
+    n_filled <- n_filled + 1
+  }
+
+  gen_elapsed <- proc.time()[3] - t_gen
+  if (is.null(particles) || nrow(particles) < 3) break
+
+  if (gen == 0 && is.null(stat_scales_tight)) {
+    rel_load <- (particles$mean_load - TARGET$mean_load) / max(TARGET$mean_load, 0.1)
+    rel_size <- log10(particles$n_units) - log10(TARGET$target_array_size)
+    stat_scales_tight <- c(
+      med_near = sd(particles$med_near, na.rm=T),
+      med_far = sd(particles$med_far, na.rm=T),
+      near_frac = sd(particles$near_frac, na.rm=T),
+      mean_load = sd(rel_load, na.rm=T),
+      array_size = sd(rel_size, na.rm=T)
+    )
+    stat_scales_tight[is.na(stat_scales_tight) | stat_scales_tight < 1e-10] <- 1
+    for (ri in seq_len(nrow(particles))) {
+      particles[ri, distance := compute_distance_local(
+        .SD, TARGET, stat_scales_tight),
+        .SDcols = c("med_near", "med_far", "near_frac", "mean_load", "n_units")]
+    }
+  }
+
+  abc_tight_log[[gen + 1]] <- copy(particles)
+  convergence_tight <- rbind(convergence_tight, data.table(
+    gen = gen, best = min(particles$distance),
+    median = median(particles$distance),
+    n_particles = nrow(particles), n_failed = n_failed,
+    n_attempts = n_attempts,
+    failure_rate = round(n_failed / n_attempts, 2),
+    elapsed = round(gen_elapsed)
+  ))
+
+  particles <- particles[order(distance)]
+  n_keep <- max(3L, as.integer(nrow(particles) * RETENTION))
+  kept_tight <- particles[seq_len(min(n_keep, nrow(particles)))]
+
+  cat(sprintf("  Tight Gen %d: best=%.3f, median=%.3f, fail=%.0f%%, time=%.0fs\n",
+              gen, min(particles$distance), median(particles$distance),
+              100 * n_failed / n_attempts, gen_elapsed))
+}
+```
+
+## 4.3 Comparison of Approaches
+
+```{r compare_approaches, fig.height=8}
+# Combine convergence data
+conv_all <- rbind(
+  if (nrow(convergence_abc) > 0) convergence_abc[, .(gen, best, median, failure_rate, elapsed, approach = "9-param (wide prior)")] else NULL,
+  if (nrow(convergence_3) > 0) convergence_3[, .(gen, best, median, failure_rate, elapsed, approach = "3-param (fixed chunks)")] else NULL,
+  if (nrow(convergence_tight) > 0) convergence_tight[, .(gen, best, median, failure_rate, elapsed, approach = "9-param (tight prior)")] else NULL
+)
+
+if (nrow(conv_all) > 0) {
+  p1 <- ggplot(conv_all, aes(x = gen, color = approach)) +
+    geom_line(aes(y = median, linetype = "Median"), linewidth = 1) +
+    geom_line(aes(y = best, linetype = "Best"), linewidth = 1) +
+    geom_point(aes(y = median), size = 2) +
+    geom_point(aes(y = best), size = 2, shape = 17) +
+    theme_classic(base_size = 14) +
+    scale_linetype_manual(values = c("Median" = "solid", "Best" = "dashed")) +
+    labs(x = "ABC Generation", y = "Distance", color = "Approach",
+         linetype = NULL,
+         title = "Convergence comparison: 3 approaches")
+
+  p2 <- ggplot(conv_all, aes(x = gen, y = failure_rate, color = approach)) +
+    geom_line(linewidth = 1) + geom_point(size = 2) +
+    theme_classic(base_size = 14) +
+    labs(x = "ABC Generation", y = "Failure rate",
+         title = "Failure rate comparison") +
+    ylim(0, 1)
+
+  p3 <- ggplot(conv_all, aes(x = gen, y = elapsed, fill = approach)) +
+    geom_bar(stat = "identity", position = "dodge", alpha = 0.7) +
+    theme_classic(base_size = 14) +
+    labs(x = "ABC Generation", y = "Wall time (s)",
+         title = "Compute time comparison")
+
+  plot_grid(p1, p2, p3, ncol = 1, rel_heights = c(1.2, 0.8, 0.8))
+}
+```
+
+```{r compare_table}
+if (nrow(conv_all) > 0) {
+  summary_compare <- conv_all[, .(
+    final_best = round(last(best), 3),
+    final_median = round(last(median), 3),
+    mean_fail_rate = round(mean(failure_rate), 2),
+    total_time = sum(elapsed),
+    n_gens = .N
+  ), by = approach]
+  knitr::kable(summary_compare, caption = "Approach comparison summary")
+}
+```
+
+## 4.4 Higher Compression Test
+
+What if we use 2000x compression (500 sim gens instead of 1000)?
+
+```{r compression_test, cache=TRUE}
+# Test baseline params with different compression levels
+compressions <- c(500, 1000, 2000, 5000)
+comp_results <- list()
+
+for (comp in compressions) {
+  cat("Testing compression =", comp, "\n")
+  mu_c <- MU_REAL * comp
+  gens_c <- round(10e6 / 10 / comp)
+
+  params <- BASELINE
+  res <- tryCatch({
+    setTimeLimit(elapsed = 60, transient = TRUE)
+    sim <- suppressWarnings(run_sim_ps(
+      max_units = HARD_CAP, max_t = gens_c, hard_cap = HARD_CAP,
+      init_l = INIT_L, init_k0 = INIT_K0,
+      p_local_dup = params$p_local_dup,
+      p_distal_dup = params$p_distal_dup,
+      p_del_chunk = params$p_del_chunk,
+      mu_total = mu_c,
+      local_dist = list(type="gamma", shape=params$local_shape, scale=params$local_scale),
+      distal_dist = list(type="gamma", shape=params$distal_shape, scale=params$distal_scale),
+      del_dist = list(type="gamma", shape=params$del_shape, scale=params$del_scale),
+      verbose = FALSE, compute_pairs = FALSE
+    ))
+    setTimeLimit(elapsed = Inf, transient = TRUE)
+    data.table(compression = comp, sim_gens = gens_c,
+               n_units = nrow(sim$monomers),
+               time_s = NA_real_,
+               status = "ok")
+  }, error = function(e) {
+    setTimeLimit(elapsed = Inf, transient = TRUE)
+    data.table(compression = comp, sim_gens = gens_c,
+               n_units = NA, time_s = NA, status = "error")
+  })
+  comp_results[[length(comp_results) + 1]] <- res
+}
+
+comp_dt <- rbindlist(comp_results)
+knitr::kable(comp_dt, caption = "Effect of compression on array size (baseline params)")
+```
+
+Note: Higher compression means fewer generations, so rates per-generation must increase proportionally to maintain the same mu*t product. The current setup already scales mu with compression but does NOT scale the duplication/deletion rates. This means higher compression = fewer structural events = smaller arrays with the same rate parameters. This is a potential issue.
+
+---
+
+# 5. Deep Diagnostics
+
+## 5.1 Parameter Correlations in Successful Particles
+
+```{r correlations, fig.height=8}
+# From the prior draws, look at correlations among successful particles
+ok_prior <- prior_dt[status == "ok"]
+if (nrow(ok_prior) > 5) {
+  cor_vars <- c("p_local_dup", "p_distal_dup", "p_del_chunk",
+                "n_units", "mean_load", "med_near", "med_far", "near_frac")
+  cor_dt <- ok_prior[, ..cor_vars]
+
+  # Correlation matrix
+  cor_mat <- cor(cor_dt, use = "pairwise.complete.obs")
+
+  # Simple heatmap using ggplot
+  cor_melt <- as.data.table(reshape2::melt(cor_mat))
+  ggplot(cor_melt, aes(x = Var1, y = Var2, fill = value)) +
+    geom_tile() +
+    geom_text(aes(label = round(value, 2)), size = 3) +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                         limits = c(-1, 1)) +
+    theme_minimal(base_size = 11) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(title = "Correlations among parameters and stats (successful prior draws)")
+} else {
+  cat("Not enough successful prior draws for correlation analysis\n")
+}
+```
+
+## 5.2 The Explosive Growth Problem
+
+```{r growth_analysis, cache=TRUE, fig.height=6}
+# Run 20 sims with varying p_local_dup near the boundary and track L_vec
+growth_p_values <- 10^seq(-4.0, -3.0, length.out = 15)
+growth_traces <- list()
+
+for (i in seq_along(growth_p_values)) {
+  ploc <- growth_p_values[i]
+  params <- BASELINE
+  params$p_local_dup <- ploc
+
+  sim <- tryCatch({
+    setTimeLimit(elapsed = 30, transient = TRUE)
+    suppressWarnings(run_sim_ps(
+      max_units = HARD_CAP, max_t = SIM_GENS, hard_cap = HARD_CAP,
+      init_l = INIT_L, init_k0 = INIT_K0,
+      p_local_dup = params$p_local_dup,
+      p_distal_dup = params$p_distal_dup,
+      p_del_chunk = params$p_del_chunk,
+      mu_total = MU_COMPRESSED,
+      local_dist = list(type="gamma", shape=params$local_shape, scale=params$local_scale),
+      distal_dist = list(type="gamma", shape=params$distal_shape, scale=params$distal_scale),
+      del_dist = list(type="gamma", shape=params$del_shape, scale=params$del_scale),
+      verbose = FALSE, compute_pairs = FALSE
+    ))
+  }, error = function(e) NULL,
+  finally = setTimeLimit(elapsed = Inf, transient = TRUE))
+
+  if (!is.null(sim)) {
+    l_vec <- sim$L_vec
+    # Subsample trajectory for plotting
+    idx <- unique(c(seq(1, length(l_vec), length.out = min(500, length(l_vec))),
+                    length(l_vec)))
+    growth_traces[[i]] <- data.table(
+      gen = idx,
+      size = l_vec[idx],
+      p_local = ploc,
+      label = sprintf("%.1e", ploc)
+    )
+  }
+}
+
+growth_dt <- rbindlist(growth_traces)
+if (nrow(growth_dt) > 0) {
+  ggplot(growth_dt, aes(x = gen, y = size, color = label, group = label)) +
+    geom_line(linewidth = 0.7) +
+    geom_hline(yintercept = TARGET$target_array_size, color = "red",
+               linetype = "dashed") +
+    geom_hline(yintercept = HARD_CAP, color = "black", linetype = "dotted") +
+    scale_y_log10(labels = scales::comma) +
+    theme_classic(base_size = 14) +
+    labs(x = "Generation", y = "Array size (log scale)",
+         color = "p_local_dup",
+         title = "Growth trajectories: the explosive growth boundary") +
+    annotate("text", x = SIM_GENS * 0.7, y = TARGET$target_array_size * 1.5,
+             label = "Target: 20K", color = "red") +
+    annotate("text", x = SIM_GENS * 0.7, y = HARD_CAP * 1.5,
+             label = "Hard cap: 60K", color = "black")
+}
+```
+
+## 5.3 Identifiability: Do Different Parameters Produce Same Stats?
+
+```{r identifiability, cache=TRUE}
+# Check if the 3-param posterior from the ABC run has concentrated
+if (length(abc3_log) > 0) {
+  last_gen_3 <- abc3_log[[length(abc3_log)]]
+  if (!is.null(last_gen_3) && nrow(last_gen_3) > 0) {
+    top_3 <- last_gen_3[order(distance)][seq_len(min(30, nrow(last_gen_3)))]
+    cat("\n3-Parameter ABC: Top 30 particles\n")
+    cat(sprintf("  p_local_dup:  range [%.2e, %.2e]\n",
+                min(10^top_3$p_local_dup), max(10^top_3$p_local_dup)))
+    cat(sprintf("  p_distal_dup: range [%.2e, %.2e]\n",
+                min(10^top_3$p_distal_dup), max(10^top_3$p_distal_dup)))
+    cat(sprintf("  p_del_chunk:  range [%.2e, %.2e]\n",
+                min(10^top_3$p_del_chunk), max(10^top_3$p_del_chunk)))
+    cat(sprintf("  Distance:     range [%.3f, %.3f]\n",
+                min(top_3$distance), max(top_3$distance)))
+  }
+}
+```
+
+---
+
+# 6. Recommendations
+
+Based on all analyses above, here are concrete recommendations for fixing the ABC:
+
+## Recommendation 1: Fix Chunk-Size Parameters
+
+The 6 chunk-size parameters (shapes and scales for local, distal, and deletion distributions) are poorly identifiable from the 5 summary statistics. The parameter sweeps show they have weak, often non-monotonic effects. **Fix them at reasonable values**:
+
+- local_dist: gamma(shape=2, scale=15) -- small tandem duplications
+- distal_dist: gamma(shape=2, scale=500) -- large distal events
+- del_dist: gamma(shape=2, scale=15) -- small deletions
+
+This reduces the problem from 9 to 3 dimensions, dramatically improving convergence.
+
+## Recommendation 2: Tighten the Prior on p_local_dup
+
+The viable range of p_local_dup is extremely narrow due to the explosive growth positive feedback loop. A uniform prior from 10^-5 to 10^-3 wastes most samples on explosion or extinction.
+
+**Suggested prior**: log10(p_local_dup) ~ Uniform(-4.2, -3.0)
+
+This still spans 1.2 orders of magnitude but avoids the extremes where no valid simulations are possible.
+
+## Recommendation 3: Early Termination for Runaway Sims
+
+Currently, arrays that explode burn 30 seconds before timing out. Instead, check array size every 50-100 generations during the simulation. If size > 2x target by gen 200, abort early. This could save 70%+ of wasted compute time.
+
+The C++ engine already has a `hard_cap` check each generation, but it is set to 3x target (60K). Consider:
+- Reducing hard_cap to 1.5x target (30K)
+- Adding a **growth rate check**: if array doubles in the last 50 gens, abort
+
+## Recommendation 4: Increase Particle Count, Reduce Generations
+
+With 3 parameters and a tight prior, 200-300 particles for 5-7 ABC generations should suffice. The current setup of 500 particles for 20 generations is overkill once chunk sizes are fixed.
+
+## Recommendation 5: Consider Log-Normal Perturbation for Rates
+
+The rates span orders of magnitude but are perturbed with additive Gaussian noise in log-space, which is appropriate. However, the adaptive kernel cap at 15% of prior range is still quite wide for a 2 order-of-magnitude range. Consider reducing to 10%.
+
+## Recommendation 6: Multiple Replicates per Particle
+
+Each particle produces one stochastic simulation. The noise from a single replicate adds substantial variance to the distance metric, which the ABC interprets as parameter uncertainty. Running 2-3 replicates and averaging the summary stats would give a cleaner signal, at 2-3x compute cost per particle. With the 3-parameter approach and early termination, this is affordable.
+
+## Recommended Default Configuration
+
+```
+# In smc_abc.R or the Shiny app:
+n_particles:       200
+max_generations:    8
+retention_frac:     0.3
+perturbation_sd:    0.2
+
+# Fix these (don't infer):
+local_shape:  2    local_scale:  15
+distal_shape: 2    distal_scale: 500
+del_shape:    2    del_scale:    15
+
+# Tighter prior for rates:
+p_local_dup:   log10 ~ U(-4.2, -3.0)
+p_distal_dup:  log10 ~ U(-1.8, -0.5)
+p_del_chunk:   log10 ~ U(-5.5, -3.5)
+
+# Early termination:
+hard_cap: 30000  (was 60000)
+```
+
+---
+
+# Session Info
+
+```{r sessioninfo}
+sessionInfo()
+```

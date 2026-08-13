@@ -692,6 +692,7 @@ run_genome_ps <- function(
     p_conversion        = 0.000,
     p_translocation     = 0.000,
     p_invert_transloc   = 0.35,
+    p_transloc_homology = 0.0,
     p_autocorr_alpha    = 0.0,
     autocorr_window     = 50L,
     autocorr_every      = 10L,
@@ -713,6 +714,7 @@ run_genome_ps <- function(
   .check_prob(p_conversion, "p_conversion")
   .check_prob(p_translocation, "p_translocation")
   .check_prob(p_invert_transloc, "p_invert_transloc")
+  .check_prob(p_transloc_homology, "p_transloc_homology")
   .check_prob(mu_total, "mu_total")
   if (!is.numeric(p_autocorr_alpha) || length(p_autocorr_alpha) != 1L ||
       p_autocorr_alpha < 0)
@@ -720,9 +722,17 @@ run_genome_ps <- function(
   .check_pos_int(autocorr_window, "autocorr_window")
   .check_pos_int(autocorr_every, "autocorr_every")
 
-  if (is.null(hard_caps)) hard_caps <- ceiling(1.5 * target_sizes)
-  hard_caps <- as.integer(round(hard_caps))
-  if (length(hard_caps) != K) stop("hard_caps must have length K")
+  if (is.null(hard_caps)) {
+    age <- !is.null(n_generations) && is.numeric(n_generations) &&
+           length(n_generations) == 1L && n_generations >= 1
+    # AGE mode uses a GLOBAL size governor (holds the genome-wide TOTAL, not each
+    # chromosome), so a single chromosome may absorb translocated mass and grow
+    # past its own target -- give a generous per-chrom cap (a memory guard only;
+    # the genome total is what is actually held). LEGACY grows each chrom to target.
+    hard_caps <- if (age) ceiling(2 * max(target_sizes)) else ceiling(1.5 * target_sizes)
+  }
+  if (!(length(hard_caps) %in% c(1L, K))) stop("hard_caps must be length 1 or K")
+  hard_caps <- as.integer(round(rep_len(hard_caps, K)))
 
   # AGE dial (steady-state mode). If n_generations is given (>0), the genome runs
   # for exactly that many generations: chromosomes grow to their target band then
@@ -774,6 +784,7 @@ run_genome_ps <- function(
     p_translocation   = p_translocation,
     transloc_dist     = transloc_dist,
     p_invert_transloc = p_invert_transloc,
+    p_transloc_homology = p_transloc_homology,
     mu_total          = mu_total,
     p_autocorr_alpha  = p_autocorr_alpha,
     autocorr_window   = as.integer(autocorr_window),

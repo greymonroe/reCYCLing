@@ -643,6 +643,10 @@ List sim_core_cpp(IntegerVector ancestor_seq_r,
 // translocation, identical sequences shared ACROSS different chromosomes only
 // arise from the (vanishing) chance of independent convergence — i.e. ~0.
 
+// Homology tract length (# consecutive monomers that must match for a
+// homology-directed translocation to retarget onto a partner locus).
+static const int HOMOL_TRACT = 4;
+
 // [[Rcpp::export]]
 List sim_genome_cpp(IntegerVector ancestor_seq_r,
                     int K,
@@ -664,6 +668,7 @@ List sim_genome_cpp(IntegerVector ancestor_seq_r,
                     double p_translocation,
                     List transloc_dist,
                     double p_invert_transloc,
+                    double p_transloc_homology,
                     double mu_total,
                     double p_autocorr_alpha,
                     int autocorr_window,
@@ -715,14 +720,16 @@ List sim_genome_cpp(IntegerVector ancestor_seq_r,
     // Two modes, selected by n_generations:
     //   * n_generations > 0  -> AGE-DRIVEN. The loop runs for EXACTLY
     //     n_generations generations (age is the divergence dial: with mu fixed,
-    //     divergence ~= mu * age). A chromosome below its target band GROWS
-    //     (dup-biased); once it reaches the band it enters STEADY-STATE TURNOVER
-    //     -- local duplication keeps firing at p_local_dup (fresh identical
-    //     twins) while a PER-CHROM SIZE GOVERNOR raises chunk deletion to match
-    //     the duplication mass (net-zero size), with a proportional correction
-    //     that pulls size back toward target (absorbing translocation overshoot).
-    //     So redundancy is held at steady size (like a single growing-then-
-    //     stopping array) instead of decaying as the clock ages a frozen array.
+    //     divergence ~= mu * age). Every chromosome is seeded AT its own target
+    //     size and runs STEADY-STATE TURNOVER -- local duplication keeps firing at
+    //     p_local_dup (fresh identical twins) while a single GLOBAL (whole-genome)
+    //     SIZE GOVERNOR sets one genome-wide chunk-deletion prob that matches the
+    //     TOTAL duplication mass, with a proportional correction that pulls the
+    //     SUM of all chromosome sizes back toward the total target only when it
+    //     drifts outside a +/- band deadzone. Individual chromosomes are FREE to
+    //     expand/shrink (translocation moves mass between them); only the total is
+    //     held. So redundancy is steady and translocated blocks persist instead of
+    //     being deleted by a per-chrom governor reacting to recipient overshoot.
     //   * n_generations <= 0 -> LEGACY: grow until all arrays reach target then
     //     stop (the old behavior; over-target arrays freeze). Kept for back-compat.
     // The governor uses dup/del chunk MEANS to balance per-unit mass; in steady
@@ -733,7 +740,7 @@ List sim_genome_cpp(IntegerVector ancestor_seq_r,
     // long-range distal *deletion* (p_distal_del, a terminal truncation that
     // would fight the governor) stays off in steady state.
     int  t_limit  = age_mode ? n_generations : max_t;
-    double band   = (size_band > 0.0) ? size_band : 0.10;  // +/- fraction of target
+    double band   = (size_band > 0.0) ? size_band : 0.10;  // +/- fraction of TOTAL target (deadband)
     double mean_local  = dist_mean(local_dist);
     double mean_del    = dist_mean(del_dist);
     double mean_distal = dist_mean(distal_dist);
@@ -741,6 +748,17 @@ List sim_genome_cpp(IntegerVector ancestor_seq_r,
     // fractional size error); chosen so a full-band overshoot adds ~the balance
     // deletion again. Clamped downstream so it can never exceed a sane rate.
     double gov_gain = 0.5;
+    // WEAK per-chromosome restoring gain: on top of the global total governor,
+    // each chromosome is gently pulled back toward ITS OWN target size when it
+    // drifts outside the +/- band, so chromosomes keep their characteristic sizes
+    // (the long-term per-chrom size stability seen in the real genomes) instead
+    // of random-walking to the genome mean. MUCH weaker than gov_gain so the
+    // relaxation time (~1/perchrom_gain gens) is long: a translocation swell
+    // persists as a transient bump and erodes only slowly (at the background
+    // turnover rate, NOT preferentially), keeping the cross-chrom signal visible.
+    // Since the per-chrom targets SUM to the total target, this restoring is
+    // consistent with the global governor (they pull the same direction).
+    double perchrom_gain = 0.01;
 
     while (t < t_limit) {
         // LEGACY mode termination: all arrays reached target -> stop.
@@ -772,18 +790,69 @@ List sim_genome_cpp(IntegerVector ancestor_seq_r,
         }
         if (t % 100 == 0) Rcpp::checkUserInterrupt();
 
-        // === 1. WITHIN-ARRAY MOVES, per chromosome (governed) ===
+        // === 1. WITHIN-ARRAY MOVES (governed) ===
         // Autocatalytic local-dup cadence gate (same scheme as sim_core_cpp):
         // recompute the local-redundancy weighting only every autocorr_every gens.
         bool ac_active_gen = (p_autocorr_alpha > 0.0) &&
                              (autocorr_every <= 1 || (t % autocorr_every) == 0);
+
+        // GLOBAL (WHOLE-GENOME) SIZE GOVERNOR (age mode).
+        // ----------------------------------------------------------------------
+        // Size is controlled on the TOTAL monomer count summed over ALL K
+        // chromosomes, NOT per chromosome. Individual chromosomes are free to
+        // expand and shrink -- a chromosome that RECEIVES a translocated block
+        // stays larger and its DONOR stays smaller -- while only the genome-wide
+        // SUM is held near the total target (within a +/- `band` deadzone where
+        // it floats freely on the net-zero balance, with a proportional pull only
+        // once it drifts outside the band).
+        //
+        // WHY: the old per-chromosome governor raised a RECIPIENT chromosome's own
+        // deletion the instant a translocation pushed it above its band, eroding
+        // the very cross-chromosome block we are trying to accumulate. A single
+        // genome-wide deletion rate lets translocated blocks persist (they only
+        // erode at the background turnover rate, like any monomer), so standing
+        // cross-chrom sharing -- the fingerprint's off-diagonal ink -- can build
+        // up. Chromosomes changing size via translocation becomes an emergent,
+        // inferrable feature instead of something the governor cancels.
+        //
+        // The single genome-wide per-unit deletion prob balances the TOTAL
+        // duplication mass (local + within-array distal, summed over chromosomes):
+        //   local dup mass  = p_local_dup  * total_sz   * mean_local  (per-unit x all monomers)
+        //   distal dup mass = p_distal_dup * mean_distal * K          (per-array event x K chroms)
+        //   deletion mass   = p_del        * total_sz   * mean_del    (per-unit x all monomers)
+        // => p_del_balance  = p_local_dup*mean_local/mean_del
+        //                   + p_distal_dup*mean_distal*K/(total_sz*mean_del)
+        // plus gov_gain * (banded fractional total-size error) / mean_del.
+        double p_del_global = p_del_chunk;   // legacy fallback (unused in age mode)
+        if (age_mode) {
+            double total_target = 0.0, total_sz = 0.0;
+            for (int c = 0; c < K; c++) {
+                total_target += (double)target_sizes[c];
+                total_sz     += (double)genome[c].size();
+            }
+            p_del_global = 0.0;
+            if (mean_del > 0.0 && total_sz > 0.0) {
+                double p_del_balance = p_local_dup * mean_local / mean_del
+                                     + p_distal_dup * mean_distal * (double)K
+                                       / (total_sz * mean_del);
+                // banded fractional size error: zero inside +/- band (free float),
+                // positive above the band (delete more), negative below (delete less).
+                double err_raw = (total_target > 0.0)
+                                 ? (total_sz - total_target) / total_target : 0.0;
+                double err = 0.0;
+                if      (err_raw >  band) err = err_raw - band;
+                else if (err_raw < -band) err = err_raw + band;
+                p_del_global = p_del_balance + gov_gain * err / mean_del;
+                if (p_del_global < 0.0) p_del_global = 0.0;
+                if (p_del_global > 0.5) p_del_global = 0.5;
+            }
+        }
+
         for (int c = 0; c < K; c++) {
-            int    sz  = (int)genome[c].size();
-            double tgt = (double)target_sizes[c];
-            double lo_band = tgt * (1.0 - band);
+            int sz = (int)genome[c].size();
 
             if (!age_mode) {
-                // LEGACY: only grow until target, then freeze (old behavior).
+                // LEGACY: grow until target, then freeze (old behavior, back-compat).
                 if (sz >= target_sizes[c]) continue;
                 if (sz >= hard_caps[c])    continue;
                 apply_within_array_moves(genome[c],
@@ -797,56 +866,40 @@ List sim_genome_cpp(IntegerVector ancestor_seq_r,
                 continue;
             }
 
-            // AGE mode: governed growth-then-turnover.
-            if (sz < (int)lo_band) {
-                // BELOW BAND -> GROWTH (dup-biased): base rates, full move set.
-                // Cap-respect: don't let a runaway distal event blow past hard cap.
-                if (sz >= hard_caps[c]) continue;
-                apply_within_array_moves(genome[c],
-                                         p_local_dup, local_dist,
-                                         p_distal_dup, distal_dist, p_invert_distal,
-                                         p_del_chunk, del_dist, p_distal_del,
-                                         p_conversion, conv_dist, conv_tract,
-                                         mu_total,
-                                         p_autocorr_alpha, autocorr_window,
-                                         ac_active_gen);
-            } else {
-                // AT/ABOVE BAND -> STEADY-STATE TURNOVER.
-                // Keep local dup AND within-array distal dup firing (fresh twins /
-                // off-diagonal copies); raise the per-unit chunk-deletion prob to
-                // MATCH the TOTAL duplication mass (local + distal), plus a
-                // proportional pull toward target (delete-biased when above,
-                // dup-biased when below within the band). Long-range distal
-                // DELETION (terminal truncation) stays off so the governor stays
-                // in control of the size.
-                double p_local_eff = p_local_dup;
-                // net-zero balance per generation:
-                //   local dup mass  = p_local * sz * mean_local   (per-unit)
-                //   distal dup mass = p_distal_dup * mean_distal   (per-array event)
-                //   deletion mass   = p_del * sz * mean_del        (per-unit)
-                // => p_del_balance = p_local*mean_local/mean_del
-                //                  + p_distal_dup*mean_distal/(sz*mean_del)
-                double p_del_balance = 0.0;
-                if (mean_del > 0.0) {
-                    p_del_balance = p_local_eff * mean_local / mean_del;
-                    if (sz > 0)
-                        p_del_balance += p_distal_dup * mean_distal
-                                         / ((double)sz * mean_del);
-                }
-                // fractional size error (positive when above target)
-                double err = (tgt > 0.0) ? ((double)sz - tgt) / tgt : 0.0;
-                double p_del_eff = p_del_balance + gov_gain * err / mean_del;
-                if (p_del_eff < 0.0) p_del_eff = 0.0;
-                if (p_del_eff > 0.5) p_del_eff = 0.5;
-                apply_within_array_moves(genome[c],
-                                         p_local_eff, local_dist,
-                                         /*p_distal_dup=*/p_distal_dup, distal_dist, p_invert_distal,
-                                         p_del_eff, del_dist, /*p_distal_del=*/0.0,
-                                         p_conversion, conv_dist, conv_tract,
-                                         mu_total,
-                                         p_autocorr_alpha, autocorr_window,
-                                         ac_active_gen);
+            // AGE mode: GLOBAL-governed steady-state turnover with a WEAK
+            // per-chrom restoring anchor. Local dup AND within-array distal dup
+            // keep firing (fresh twins / off-diagonal copies); the genome-wide
+            // governed deletion p_del_global absorbs the total duplication mass,
+            // and a weak per-chrom term gently pulls this chromosome back toward
+            // its OWN target when it drifts outside the band (long-term size
+            // stability without erasing transient translocation swells). Long-
+            // range distal DELETION stays off so the governor stays in control.
+            // A chromosome at/over its hard cap stops GROWING (dup off) but still
+            // DELETES, keeping memory bounded while the rest of the genome carries
+            // the size.
+            double p_local_eff  = p_local_dup;
+            double p_distal_eff = p_distal_dup;
+            if (sz >= hard_caps[c]) { p_local_eff = 0.0; p_distal_eff = 0.0; }
+            // weak per-chrom restoring toward own target (banded deadzone)
+            double p_del_c = p_del_global;
+            double tgt_c   = (double)target_sizes[c];
+            if (tgt_c > 0.0 && mean_del > 0.0) {
+                double e_raw = ((double)sz - tgt_c) / tgt_c;
+                double e = 0.0;
+                if      (e_raw >  band) e = e_raw - band;
+                else if (e_raw < -band) e = e_raw + band;
+                p_del_c = p_del_global + perchrom_gain * e / mean_del;
+                if (p_del_c < 0.0) p_del_c = 0.0;
+                if (p_del_c > 0.5) p_del_c = 0.5;
             }
+            apply_within_array_moves(genome[c],
+                                     p_local_eff, local_dist,
+                                     p_distal_eff, distal_dist, p_invert_distal,
+                                     p_del_c, del_dist, /*p_distal_del=*/0.0,
+                                     p_conversion, conv_dist, conv_tract,
+                                     mu_total,
+                                     p_autocorr_alpha, autocorr_window,
+                                     ac_active_gen);
         }
 
         // === 2. INTER-CHROMOSOMAL TRANSLOCATION (per genome) ===
@@ -888,11 +941,63 @@ List sim_genome_cpp(IntegerVector ancestor_seq_r,
                                            genome[donor][j].dir);
                 }
 
-                // insert at random position in recipient
-                int rk = (int)genome[recip].size();
-                int n_positions = rk + 1;
-                int insert_at = (int)(R::runif(0.0, 1.0) * n_positions);
-                if (insert_at >= n_positions) insert_at = n_positions - 1;
+                // ---- choose insertion site -------------------------------------
+                // HOMOLOGY-DIRECTED placement (p_transloc_homology): with that
+                // probability, retarget the copy next to an EXISTING copy of the
+                // block's anchor sequence on ANOTHER chromosome -- i.e. reuse
+                // partner loci that already share this sequence. This makes
+                // cross-chromosome sharing recur between the SAME chromosome pairs
+                // (rich-get-richer on partners), concentrating the off-diagonal
+                // fingerprint ink into specific chrom-pair blocks instead of
+                // spreading it evenly across all pairs. Falls back to the original
+                // random recipient+position when no homologous site exists or the
+                // draw is not homology-directed. At p_transloc_homology==0 the
+                // extra draw is short-circuited => bit-identical to the old rule.
+                int insert_at = -1;
+                bool placed = false;
+                if (p_transloc_homology > 0.0 &&
+                    R::runif(0.0, 1.0) < p_transloc_homology) {
+                    // EXTENDED-HOMOLOGY anchor: require a run of A consecutive donor
+                    // monomers to match consecutive recipient monomers. A single-
+                    // monomer anchor matches the ubiquitous ancestral consensus
+                    // everywhere (=> no concentration); an A-mer signature of the
+                    // block's (often derived) sequences recurs only at TRUE
+                    // homologous partner loci, so reuse concentrates cross-chrom
+                    // sharing into specific chromosome pairs.
+                    int chunklen = end - start + 1;
+                    int A = chunklen < HOMOL_TRACT ? chunklen : HOMOL_TRACT;
+                    uint64_t ah[HOMOL_TRACT];
+                    for (int a = 0; a < A; a++)
+                        ah[a] = seq_hash(genome[donor][start + a].seq);
+                    long seen = 0;                       // reservoir-sample 1 match
+                    for (int c = 0; c < K; c++) {
+                        if (c == donor) continue;
+                        if ((int)genome[c].size() >= hard_caps[c]) continue;
+                        std::vector<Monomer>& gg = genome[c];
+                        int gs = (int)gg.size();
+                        for (int q = 0; q + A <= gs; q++) {
+                            bool match = true;
+                            for (int a = 0; a < A; a++)
+                                if (seq_hash(gg[q + a].seq) != ah[a]) { match = false; break; }
+                            if (match) {
+                                seen++;
+                                if (R::runif(0.0, 1.0) < 1.0 / (double)seen) {
+                                    recip = c; insert_at = q + A;   // just past matched run
+                                }
+                            }
+                        }
+                    }
+                    if (insert_at >= 0) placed = true;   // homologous partner site found
+                }
+                if (!placed) {
+                    // original behaviour: random position in the recipient chosen above
+                    int rk = (int)genome[recip].size();
+                    int n_positions = rk + 1;
+                    insert_at = (int)(R::runif(0.0, 1.0) * n_positions);
+                    if (insert_at >= n_positions) insert_at = n_positions - 1;
+                }
+                int rk2 = (int)genome[recip].size();     // clamp (recip may have changed)
+                if (insert_at > rk2) insert_at = rk2;
                 genome[recip].insert(genome[recip].begin() + insert_at,
                                      std::make_move_iterator(chunk.begin()),
                                      std::make_move_iterator(chunk.end()));

@@ -7,3 +7,7 @@
 src/*.o
 src/*.so
 src/*.dll
+
+vignettes/*_cache/
+vignettes/*_files/
+analysis/cache/
