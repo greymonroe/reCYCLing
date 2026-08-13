@@ -11,8 +11,8 @@ Rcpp::Rostream<false>& Rcpp::Rcerr = Rcpp::Rcpp_cerr_get();
 #endif
 
 // sim_core_cpp
-List sim_core_cpp(IntegerVector ancestor_seq_r, int init_k0, int max_units, int max_t, int hard_cap, double p_local_dup, List local_dist, double p_distal_dup, List distal_dist, double p_invert_distal, double p_del_chunk, List del_dist, double p_distal_del, double p_conversion, List conv_dist, List conv_tract, double mu_total, double p_autocorr_alpha, int autocorr_window, int autocorr_every, bool verbose);
-RcppExport SEXP _reCYCLing_sim_core_cpp(SEXP ancestor_seq_rSEXP, SEXP init_k0SEXP, SEXP max_unitsSEXP, SEXP max_tSEXP, SEXP hard_capSEXP, SEXP p_local_dupSEXP, SEXP local_distSEXP, SEXP p_distal_dupSEXP, SEXP distal_distSEXP, SEXP p_invert_distalSEXP, SEXP p_del_chunkSEXP, SEXP del_distSEXP, SEXP p_distal_delSEXP, SEXP p_conversionSEXP, SEXP conv_distSEXP, SEXP conv_tractSEXP, SEXP mu_totalSEXP, SEXP p_autocorr_alphaSEXP, SEXP autocorr_windowSEXP, SEXP autocorr_everySEXP, SEXP verboseSEXP) {
+List sim_core_cpp(IntegerVector ancestor_seq_r, int init_k0, int max_units, int max_t, int hard_cap, double p_local_dup, List local_dist, double p_distal_dup, List distal_dist, double p_invert_distal, double p_del_chunk, List del_dist, double p_distal_del, double p_conversion, List conv_dist, List conv_tract, double mu_total, bool verbose);
+RcppExport SEXP _reCYCLing_sim_core_cpp(SEXP ancestor_seq_rSEXP, SEXP init_k0SEXP, SEXP max_unitsSEXP, SEXP max_tSEXP, SEXP hard_capSEXP, SEXP p_local_dupSEXP, SEXP local_distSEXP, SEXP p_distal_dupSEXP, SEXP distal_distSEXP, SEXP p_invert_distalSEXP, SEXP p_del_chunkSEXP, SEXP del_distSEXP, SEXP p_distal_delSEXP, SEXP p_conversionSEXP, SEXP conv_distSEXP, SEXP conv_tractSEXP, SEXP mu_totalSEXP, SEXP verboseSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
@@ -33,56 +33,42 @@ BEGIN_RCPP
     Rcpp::traits::input_parameter< List >::type conv_dist(conv_distSEXP);
     Rcpp::traits::input_parameter< List >::type conv_tract(conv_tractSEXP);
     Rcpp::traits::input_parameter< double >::type mu_total(mu_totalSEXP);
-    Rcpp::traits::input_parameter< double >::type p_autocorr_alpha(p_autocorr_alphaSEXP);
-    Rcpp::traits::input_parameter< int >::type autocorr_window(autocorr_windowSEXP);
-    Rcpp::traits::input_parameter< int >::type autocorr_every(autocorr_everySEXP);
     Rcpp::traits::input_parameter< bool >::type verbose(verboseSEXP);
-    rcpp_result_gen = Rcpp::wrap(sim_core_cpp(ancestor_seq_r, init_k0, max_units, max_t, hard_cap, p_local_dup, local_dist, p_distal_dup, distal_dist, p_invert_distal, p_del_chunk, del_dist, p_distal_del, p_conversion, conv_dist, conv_tract, mu_total, p_autocorr_alpha, autocorr_window, autocorr_every, verbose));
+    rcpp_result_gen = Rcpp::wrap(sim_core_cpp(ancestor_seq_r, init_k0, max_units, max_t, hard_cap, p_local_dup, local_dist, p_distal_dup, distal_dist, p_invert_distal, p_del_chunk, del_dist, p_distal_del, p_conversion, conv_dist, conv_tract, mu_total, verbose));
     return rcpp_result_gen;
 END_RCPP
 }
 // sim_genome_cpp
-List sim_genome_cpp(IntegerVector ancestor_seq_r, int K, IntegerVector target_sizes_r, int init_k0, int max_t, IntegerVector hard_caps_r, double p_local_dup, List local_dist, double p_distal_dup, List distal_dist, double p_invert_distal, double p_del_chunk, List del_dist, double p_distal_del, double p_conversion, List conv_dist, List conv_tract, double p_translocation, List transloc_dist, double p_invert_transloc, double p_transloc_homology, double mu_total, double p_autocorr_alpha, int autocorr_window, int autocorr_every, int n_generations, double size_band, bool verbose);
-RcppExport SEXP _reCYCLing_sim_genome_cpp(SEXP ancestor_seq_rSEXP, SEXP KSEXP, SEXP target_sizes_rSEXP, SEXP init_k0SEXP, SEXP max_tSEXP, SEXP hard_caps_rSEXP, SEXP p_local_dupSEXP, SEXP local_distSEXP, SEXP p_distal_dupSEXP, SEXP distal_distSEXP, SEXP p_invert_distalSEXP, SEXP p_del_chunkSEXP, SEXP del_distSEXP, SEXP p_distal_delSEXP, SEXP p_conversionSEXP, SEXP conv_distSEXP, SEXP conv_tractSEXP, SEXP p_translocationSEXP, SEXP transloc_distSEXP, SEXP p_invert_translocSEXP, SEXP p_transloc_homologySEXP, SEXP mu_totalSEXP, SEXP p_autocorr_alphaSEXP, SEXP autocorr_windowSEXP, SEXP autocorr_everySEXP, SEXP n_generationsSEXP, SEXP size_bandSEXP, SEXP verboseSEXP) {
+List sim_genome_cpp(IntegerVector ancestor_seq_r, int K, IntegerVector target_sizes_r, IntegerVector hard_caps_r, int n_generations, double size_band, double p_local_dup, List local_dist, double p_distal_dup, List distal_dist, double p_invert_distal, List del_dist, double p_translocation, List transloc_dist, double p_invert_transloc, double mu_total, bool verbose);
+RcppExport SEXP _reCYCLing_sim_genome_cpp(SEXP ancestor_seq_rSEXP, SEXP KSEXP, SEXP target_sizes_rSEXP, SEXP hard_caps_rSEXP, SEXP n_generationsSEXP, SEXP size_bandSEXP, SEXP p_local_dupSEXP, SEXP local_distSEXP, SEXP p_distal_dupSEXP, SEXP distal_distSEXP, SEXP p_invert_distalSEXP, SEXP del_distSEXP, SEXP p_translocationSEXP, SEXP transloc_distSEXP, SEXP p_invert_translocSEXP, SEXP mu_totalSEXP, SEXP verboseSEXP) {
 BEGIN_RCPP
     Rcpp::RObject rcpp_result_gen;
     Rcpp::RNGScope rcpp_rngScope_gen;
     Rcpp::traits::input_parameter< IntegerVector >::type ancestor_seq_r(ancestor_seq_rSEXP);
     Rcpp::traits::input_parameter< int >::type K(KSEXP);
     Rcpp::traits::input_parameter< IntegerVector >::type target_sizes_r(target_sizes_rSEXP);
-    Rcpp::traits::input_parameter< int >::type init_k0(init_k0SEXP);
-    Rcpp::traits::input_parameter< int >::type max_t(max_tSEXP);
     Rcpp::traits::input_parameter< IntegerVector >::type hard_caps_r(hard_caps_rSEXP);
+    Rcpp::traits::input_parameter< int >::type n_generations(n_generationsSEXP);
+    Rcpp::traits::input_parameter< double >::type size_band(size_bandSEXP);
     Rcpp::traits::input_parameter< double >::type p_local_dup(p_local_dupSEXP);
     Rcpp::traits::input_parameter< List >::type local_dist(local_distSEXP);
     Rcpp::traits::input_parameter< double >::type p_distal_dup(p_distal_dupSEXP);
     Rcpp::traits::input_parameter< List >::type distal_dist(distal_distSEXP);
     Rcpp::traits::input_parameter< double >::type p_invert_distal(p_invert_distalSEXP);
-    Rcpp::traits::input_parameter< double >::type p_del_chunk(p_del_chunkSEXP);
     Rcpp::traits::input_parameter< List >::type del_dist(del_distSEXP);
-    Rcpp::traits::input_parameter< double >::type p_distal_del(p_distal_delSEXP);
-    Rcpp::traits::input_parameter< double >::type p_conversion(p_conversionSEXP);
-    Rcpp::traits::input_parameter< List >::type conv_dist(conv_distSEXP);
-    Rcpp::traits::input_parameter< List >::type conv_tract(conv_tractSEXP);
     Rcpp::traits::input_parameter< double >::type p_translocation(p_translocationSEXP);
     Rcpp::traits::input_parameter< List >::type transloc_dist(transloc_distSEXP);
     Rcpp::traits::input_parameter< double >::type p_invert_transloc(p_invert_translocSEXP);
-    Rcpp::traits::input_parameter< double >::type p_transloc_homology(p_transloc_homologySEXP);
     Rcpp::traits::input_parameter< double >::type mu_total(mu_totalSEXP);
-    Rcpp::traits::input_parameter< double >::type p_autocorr_alpha(p_autocorr_alphaSEXP);
-    Rcpp::traits::input_parameter< int >::type autocorr_window(autocorr_windowSEXP);
-    Rcpp::traits::input_parameter< int >::type autocorr_every(autocorr_everySEXP);
-    Rcpp::traits::input_parameter< int >::type n_generations(n_generationsSEXP);
-    Rcpp::traits::input_parameter< double >::type size_band(size_bandSEXP);
     Rcpp::traits::input_parameter< bool >::type verbose(verboseSEXP);
-    rcpp_result_gen = Rcpp::wrap(sim_genome_cpp(ancestor_seq_r, K, target_sizes_r, init_k0, max_t, hard_caps_r, p_local_dup, local_dist, p_distal_dup, distal_dist, p_invert_distal, p_del_chunk, del_dist, p_distal_del, p_conversion, conv_dist, conv_tract, p_translocation, transloc_dist, p_invert_transloc, p_transloc_homology, mu_total, p_autocorr_alpha, autocorr_window, autocorr_every, n_generations, size_band, verbose));
+    rcpp_result_gen = Rcpp::wrap(sim_genome_cpp(ancestor_seq_r, K, target_sizes_r, hard_caps_r, n_generations, size_band, p_local_dup, local_dist, p_distal_dup, distal_dist, p_invert_distal, del_dist, p_translocation, transloc_dist, p_invert_transloc, mu_total, verbose));
     return rcpp_result_gen;
 END_RCPP
 }
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_reCYCLing_sim_core_cpp", (DL_FUNC) &_reCYCLing_sim_core_cpp, 21},
-    {"_reCYCLing_sim_genome_cpp", (DL_FUNC) &_reCYCLing_sim_genome_cpp, 28},
+    {"_reCYCLing_sim_core_cpp", (DL_FUNC) &_reCYCLing_sim_core_cpp, 18},
+    {"_reCYCLing_sim_genome_cpp", (DL_FUNC) &_reCYCLing_sim_genome_cpp, 17},
     {NULL, NULL, 0}
 };
 

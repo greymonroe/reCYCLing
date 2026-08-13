@@ -320,8 +320,6 @@
                                    p_distal_dup, distal_dist, p_invert_distal,
                                    p_del_chunk, del_dist, p_distal_del = 0,
                                    p_conversion = 0, conv_dist = NULL, conv_tract = NULL,
-                                   p_autocorr_alpha = 0, autocorr_window = 50L,
-                                   autocorr_every = 10L,
                                    mu_total, verbose, compute_pairs = TRUE) {
   # Generate ancestor sequence
   units <- init_array(l = init_l, k0 = 1L,
@@ -354,9 +352,6 @@
     conv_dist        = if (is.null(conv_dist)) list(type="gamma", shape=1, scale=20) else conv_dist,
     conv_tract       = if (is.null(conv_tract)) list(type="gamma", shape=1, scale=1) else conv_tract,
     mu_total         = mu_total,
-    p_autocorr_alpha = p_autocorr_alpha,
-    autocorr_window  = as.integer(autocorr_window),
-    autocorr_every   = as.integer(autocorr_every),
     verbose          = verbose
   )
 
@@ -532,9 +527,6 @@ run_sim_ps <- function(
     p_del_chunk          = 0.000,
     p_distal_del         = 0.000,
     p_conversion         = 0.000,
-    p_autocorr_alpha     = 0.0,
-    autocorr_window      = 50L,
-    autocorr_every       = 10L,
     mu_total             = 0.0001,
     p_sub                = 1,
     p_ins                = 0,
@@ -558,11 +550,6 @@ run_sim_ps <- function(
   .check_prob(p_distal_del, "p_distal_del")
   .check_prob(p_conversion, "p_conversion")
   .check_prob(mu_total, "mu_total")
-  if (!is.numeric(p_autocorr_alpha) || length(p_autocorr_alpha) != 1L ||
-      p_autocorr_alpha < 0)
-    stop("p_autocorr_alpha must be a single numeric >= 0")
-  .check_pos_int(autocorr_window, "autocorr_window")
-  .check_pos_int(autocorr_every, "autocorr_every")
   if (hard_cap < max_units)
     warning("hard_cap (", hard_cap, ") < max_units (", max_units,
             "); simulations may never reach max_units", call. = FALSE)
@@ -591,15 +578,10 @@ run_sim_ps <- function(
       p_invert_distal = p_invert_distal,
       p_del_chunk = p_del_chunk, del_dist = del_dist, p_distal_del = p_distal_del,
       p_conversion = p_conversion, conv_dist = conv_dist, conv_tract = conv_tract,
-      p_autocorr_alpha = p_autocorr_alpha, autocorr_window = autocorr_window,
-      autocorr_every = autocorr_every,
       mu_total = mu_total, verbose = verbose,
       compute_pairs = compute_pairs
     )
   } else {
-    if (p_autocorr_alpha > 0)
-      stop("autocatalytic local duplication (p_autocorr_alpha > 0) is only ",
-           "implemented in the C++ backend; use backend = 'cpp'.", call. = FALSE)
     .run_one_replicate(
       rep_i = 1L,
       init_l = init_l, init_k0 = init_k0,
@@ -617,86 +599,110 @@ run_sim_ps <- function(
   }
 }
 
+
 # ============================================================
 # Multi-chromosome (single-haplotype) genome simulation
 # ============================================================
 
-#' Run a multi-chromosome genome simulation with inter-chromosomal translocation
+#' Simulate the evolution of a multi-chromosome satellite repeat genome
 #'
-#' Simulates a single haplotype as \code{K} chromosome arrays evolving in one
-#' shared per-generation event loop. Each chromosome experiences the usual
-#' within-array moves (local/distal duplication, conversion, deletion) and grows
-#' toward its own \code{target_sizes[k]}. In addition, with per-generation
-#' per-genome probability \code{p_translocation}, a contiguous chunk is copied
-#' from a random donor chromosome into a random recipient chromosome (inverted
-#' w.p. \code{p_invert_transloc}) -- the inter-chromosomal translocation move.
+#' The core simulation of the reCYCLing model: a single haplotype held as
+#' \code{K} chromosome repeat arrays that age in place for exactly
+#' \code{n_generations} generations of steady-state turnover. Three
+#' mechanisms generate new monomer copies:
+#'
+#' \describe{
+#'   \item{Local duplication}{Each monomer triggers with per-generation
+#'     probability \code{p_local_dup}; a contiguous chunk starting at that
+#'     monomer (size drawn from \code{local_dist}) is duplicated in place.
+#'     The chunk-size distribution is the "unit size" of local expansion.}
+#'   \item{Long-range (distal) duplication}{With per-chromosome per-generation
+#'     probability \code{p_distal_dup}, a contiguous chunk (size from
+#'     \code{distal_dist}) is copied from a random position and inserted at
+#'     another random position on the SAME chromosome.}
+#'   \item{Inter-chromosomal exchange}{With per-genome per-generation
+#'     probability \code{p_translocation}, a contiguous chunk (size from
+#'     \code{transloc_dist}) is copied from a random donor chromosome into a
+#'     random position on a different recipient chromosome. Exchange is
+#'     modelled as duplicative (conversion-like) transfer; in single-genome
+#'     data reciprocal and non-reciprocal exchange are indistinguishable.}
+#' }
+#'
+#' Monomers mutate at \code{mu_total} per base per generation (Jukes-Cantor),
+#' so with the duplication rates fixed, \code{n_generations} is the divergence
+#' dial (divergence-from-consensus ~ mu x effective turnover age). A global
+#' size governor balances total duplication mass with chunk deletions
+#' (sizes from \code{del_dist}) and holds the genome-wide total monomer count
+#' near \code{sum(target_sizes)} within a \code{size_band} deadband;
+#' individual chromosomes float freely so exchanged blocks persist.
 #'
 #' All chromosomes are seeded from the SAME ancestral monomer, so without
-#' translocation any cross-chromosome identical-sequence sharing arises only by
-#' (vanishing) convergence; translocation is what creates genome-wide sharing.
+#' exchange, cross-chromosome identical sharing arises only by (vanishing)
+#' convergence; exchange is what creates genome-wide sharing.
 #'
 #' @param K Integer. Number of chromosome arrays.
-#' @param target_sizes Integer vector (length K). Target unit count per chrom.
-#' @param init_k0 Integer. Initial copies per chromosome. Default 10.
-#' @param max_t Numeric. Max generations (Inf allowed -> capped internally).
-#' @param hard_caps Integer vector (length K) or NULL. Per-chrom safety cap.
-#'   Default 1.5 * target_sizes.
-#' @param init_l Integer. Monomer length (bp). Default 178.
-#' @param init_sequence_type,ancestor_seq Passed to \code{init_array} to make the
-#'   shared ancestral monomer.
-#' @param local_dist,distal_dist,del_dist,conv_dist,conv_tract Chunk-size dist
-#'   specs (see \code{run_sim_ps}).
-#' @param transloc_dist List. Chunk-size dist for translocation (default
-#'   gamma(shape=1, scale=transloc_chunk_mean)). If supplied, overrides
-#'   \code{transloc_chunk_mean}.
-#' @param transloc_chunk_mean Numeric. Mean chunk size for translocation when
-#'   \code{transloc_dist} is not supplied. Default 500.
-#' @param p_local_dup,p_distal_dup,p_invert_distal,p_del_chunk,p_distal_del,p_conversion
-#'   Within-array move probabilities (see \code{run_sim_ps}).
-#' @param p_translocation Numeric. Per-genome per-generation probability of an
-#'   inter-chromosomal translocation. Default 0.
-#' @param p_invert_transloc Numeric. Prob a translocated chunk is inverted.
-#'   Default 0.35.
-#' @param mu_total Numeric. Per-base per-generation substitution prob.
-#' @param verbose Logical.
+#' @param target_sizes Integer vector (length K). Monomer count per chromosome
+#'   (each chromosome is seeded at its target; the governor holds the total).
+#' @param n_generations Integer >= 1. Number of generations of steady-state
+#'   turnover (the age of the genome).
+#' @param mu_total Numeric. Per-base per-generation substitution probability.
+#'   Default 5e-5.
+#' @param p_local_dup Numeric. Per-monomer per-generation local duplication
+#'   trigger probability (sets the turnover timescale). Default 1.5e-4.
+#' @param local_dist Chunk-size distribution for local duplication, e.g.
+#'   \code{list(type = "gamma", shape = 2, scale = 15)} (mean 30 monomers).
+#'   Supported types: "fixed", "poisson", "normal", "geom", "unif", "gamma".
+#' @param p_distal_dup Numeric. Per-chromosome per-generation long-range
+#'   duplication probability. 0 disables the mechanism. Default 0.
+#' @param distal_dist Chunk-size distribution for long-range duplication.
+#'   Default gamma(shape = 2, scale = 500) (mean 1000 monomers).
+#' @param p_translocation Numeric. Per-genome per-generation inter-chromosomal
+#'   exchange probability. 0 disables the mechanism. Default 0.
+#' @param transloc_dist Chunk-size distribution for exchanged blocks. If NULL,
+#'   gamma(shape = 1, scale = transloc_chunk_mean) is used.
+#' @param transloc_chunk_mean Numeric. Mean exchanged-block size when
+#'   \code{transloc_dist} is NULL. Default 500.
+#' @param p_invert_distal Numeric. Probability a long-range duplicated chunk is
+#'   inserted inverted. Fixed nuisance parameter. Default 0.22.
+#' @param p_invert_transloc Numeric. Probability an exchanged chunk is inserted
+#'   inverted. Fixed nuisance parameter. Default 0.35.
+#' @param del_dist Chunk-size distribution for governor deletions. Default
+#'   gamma(shape = 2, scale = 15).
+#' @param size_band Numeric in (0, 1). Governor deadband as a fraction of the
+#'   total target size. Default 0.10.
+#' @param hard_caps Integer vector (length 1 or K) or NULL. Per-chromosome
+#'   memory-guard cap. Default \code{3 * max(target_sizes)}.
+#' @param init_l Integer. Monomer length in bp. Default 178.
+#' @param init_sequence_type,ancestor_seq Passed to \code{init_array} to make
+#'   the shared ancestral monomer.
+#' @param verbose Logical. Print chromosome sizes every 500 generations.
 #'
 #' @return A \code{data.table} with one row per monomer and columns
 #'   \code{chrom} (int 1..K), \code{num} (int, within-chrom position),
 #'   \code{bponly} (gapless sequence string), \code{dir} ("+"/"-").
-#'   Carries attributes \code{array_sizes}, \code{total_gens}, \code{n_transloc},
-#'   \code{hit_hard_cap}.
+#'   Carries attributes \code{array_sizes}, \code{total_gens},
+#'   \code{n_transloc}, \code{hit_hard_cap}.
 #' @export
-run_genome_ps <- function(
+sim_genome <- function(
     K,
     target_sizes,
-    init_k0   = 10,
-    max_t     = Inf,
-    n_generations = NULL,
-    size_band     = 0.10,
-    hard_caps = NULL,
-    init_l    = 178,
-    init_sequence_type = "random",
-    ancestor_seq       = NULL,
-    local_dist  = list(type = "gamma", shape = 2, scale = 15),
-    distal_dist = list(type = "gamma", shape = 2, scale = 500),
-    del_dist    = list(type = "gamma", shape = 2, scale = 15),
-    conv_dist   = list(type = "gamma", shape = 1, scale = 20),
-    conv_tract  = list(type = "gamma", shape = 1, scale = 1),
+    n_generations,
+    mu_total            = 5e-5,
+    p_local_dup         = 0.00015,
+    local_dist          = list(type = "gamma", shape = 2, scale = 15),
+    p_distal_dup        = 0,
+    distal_dist         = list(type = "gamma", shape = 2, scale = 500),
+    p_translocation     = 0,
     transloc_dist       = NULL,
     transloc_chunk_mean = 500,
-    p_local_dup         = 0.00015,
-    p_distal_dup        = 0.1,
     p_invert_distal     = 0.22,
-    p_del_chunk         = 0.000,
-    p_distal_del        = 0.000,
-    p_conversion        = 0.000,
-    p_translocation     = 0.000,
     p_invert_transloc   = 0.35,
-    p_transloc_homology = 0.0,
-    p_autocorr_alpha    = 0.0,
-    autocorr_window     = 50L,
-    autocorr_every      = 10L,
-    mu_total            = 5e-5,
+    del_dist            = list(type = "gamma", shape = 2, scale = 15),
+    size_band           = 0.10,
+    hard_caps           = NULL,
+    init_l              = 178,
+    init_sequence_type  = "random",
+    ancestor_seq        = NULL,
     verbose             = FALSE
 ) {
   .check_pos_int(K, "K")
@@ -704,52 +710,27 @@ run_genome_ps <- function(
     stop("target_sizes must have length K (", K, ")")
   target_sizes <- as.integer(round(target_sizes))
   if (any(target_sizes < 1)) stop("all target_sizes must be >= 1")
-  .check_pos_int(init_k0, "init_k0")
+  if (!is.numeric(n_generations) || length(n_generations) != 1L ||
+      n_generations < 1)
+    stop("n_generations must be a single integer >= 1")
   .check_pos_int(init_l, "init_l")
   .check_prob(p_local_dup, "p_local_dup")
   .check_prob(p_distal_dup, "p_distal_dup")
   .check_prob(p_invert_distal, "p_invert_distal")
-  .check_prob(p_del_chunk, "p_del_chunk")
-  .check_prob(p_distal_del, "p_distal_del")
-  .check_prob(p_conversion, "p_conversion")
   .check_prob(p_translocation, "p_translocation")
   .check_prob(p_invert_transloc, "p_invert_transloc")
-  .check_prob(p_transloc_homology, "p_transloc_homology")
   .check_prob(mu_total, "mu_total")
-  if (!is.numeric(p_autocorr_alpha) || length(p_autocorr_alpha) != 1L ||
-      p_autocorr_alpha < 0)
-    stop("p_autocorr_alpha must be a single numeric >= 0")
-  .check_pos_int(autocorr_window, "autocorr_window")
-  .check_pos_int(autocorr_every, "autocorr_every")
-
-  if (is.null(hard_caps)) {
-    age <- !is.null(n_generations) && is.numeric(n_generations) &&
-           length(n_generations) == 1L && n_generations >= 1
-    # AGE mode uses a GLOBAL size governor (holds the genome-wide TOTAL, not each
-    # chromosome), so a single chromosome may absorb translocated mass and grow
-    # past its own target -- give a generous per-chrom cap (a memory guard only;
-    # the genome total is what is actually held). LEGACY grows each chrom to target.
-    hard_caps <- if (age) ceiling(2 * max(target_sizes)) else ceiling(1.5 * target_sizes)
-  }
-  if (!(length(hard_caps) %in% c(1L, K))) stop("hard_caps must be length 1 or K")
-  hard_caps <- as.integer(round(rep_len(hard_caps, K)))
-
-  # AGE dial (steady-state mode). If n_generations is given (>0), the genome runs
-  # for exactly that many generations: chromosomes grow to their target band then
-  # enter net-zero TURNOVER (fresh twins held at steady size via the per-chrom
-  # governor), so divergence ~= mu*age and redundancy is maintained. If NULL/<=0,
-  # the legacy "grow until all reach target then stop" behavior is used.
-  if (is.null(n_generations)) {
-    n_generations_int <- -1L
-  } else {
-    if (!is.numeric(n_generations) || length(n_generations) != 1L ||
-        n_generations < 1)
-      stop("n_generations must be NULL or a single integer >= 1")
-    n_generations_int <- as.integer(round(n_generations))
-  }
   if (!is.numeric(size_band) || length(size_band) != 1L ||
       size_band <= 0 || size_band >= 1)
     stop("size_band must be a single numeric in (0, 1)")
+
+  # The global governor holds the genome-wide TOTAL, not each chromosome, so a
+  # single chromosome may absorb exchanged mass and grow past its own target --
+  # the cap is a generous memory guard only.
+  if (is.null(hard_caps))
+    hard_caps <- ceiling(3 * max(target_sizes))
+  if (!(length(hard_caps) %in% c(1L, K))) stop("hard_caps must be length 1 or K")
+  hard_caps <- as.integer(round(rep_len(hard_caps, K)))
 
   if (is.null(transloc_dist))
     transloc_dist <- list(type = "gamma", shape = 1, scale = transloc_chunk_mean)
@@ -761,36 +742,23 @@ run_genome_ps <- function(
   base_map <- c(A = 1L, C = 2L, G = 3L, T = 4L)
   ancestor_int <- base_map[strsplit(anc[1], "")[[1]]]
 
-  max_t_int <- if (is.infinite(max_t)) .Machine$integer.max else as.integer(max_t)
-
   res <- sim_genome_cpp(
     ancestor_seq_r    = ancestor_int,
     K                 = as.integer(K),
     target_sizes_r    = target_sizes,
-    init_k0           = as.integer(init_k0),
-    max_t             = max_t_int,
     hard_caps_r       = hard_caps,
+    n_generations     = as.integer(round(n_generations)),
+    size_band         = size_band,
     p_local_dup       = p_local_dup,
     local_dist        = local_dist,
     p_distal_dup      = p_distal_dup,
     distal_dist       = distal_dist,
     p_invert_distal   = p_invert_distal,
-    p_del_chunk       = p_del_chunk,
     del_dist          = del_dist,
-    p_distal_del      = p_distal_del,
-    p_conversion      = p_conversion,
-    conv_dist         = conv_dist,
-    conv_tract        = conv_tract,
     p_translocation   = p_translocation,
     transloc_dist     = transloc_dist,
     p_invert_transloc = p_invert_transloc,
-    p_transloc_homology = p_transloc_homology,
     mu_total          = mu_total,
-    p_autocorr_alpha  = p_autocorr_alpha,
-    autocorr_window   = as.integer(autocorr_window),
-    autocorr_every    = as.integer(autocorr_every),
-    n_generations     = n_generations_int,
-    size_band         = size_band,
     verbose           = verbose
   )
 

@@ -15,10 +15,14 @@ run_sim_ps(
   local_dist = list(type = "gamma", shape = 2, scale = 15),
   distal_dist = list(type = "gamma", shape = 2, scale = 500),
   del_dist = list(type = "gamma", shape = 2, scale = 15),
+  conv_dist = list(type = "gamma", shape = 1, scale = 20),
+  conv_tract = list(type = "gamma", shape = 1, scale = 1),
   p_local_dup = 0.00015,
   p_distal_dup = 0.1,
   p_invert_distal = 0.5,
   p_del_chunk = 0,
+  p_distal_del = 0,
+  p_conversion = 0,
   mu_total = 1e-04,
   p_sub = 1,
   p_ins = 0,
@@ -68,7 +72,13 @@ event per generation. Default 0.1.}
 is reversed in unit order before insertion. Default 0.5.}
 
 \item{p_del_chunk}{Numeric. Per-unit per-generation probability of
-triggering a deletion event. Default 0.}
+triggering a (local, internal) chunk deletion of size ~ \code{del_dist}.
+Default 0.}
+
+\item{p_distal_del}{Numeric. Per-array per-generation probability of a
+terminal (long-range) deletion: removes a chunk of size ~ \code{distal_dist}
+from the END of the array (telomere-proximal truncation; mirror of distal
+duplication). At most one event per generation. C++ backend only. Default 0.}
 
 \item{mu_total}{Numeric. Per-base per-generation mutation probability
 (applied independently to every base in every unit). Default 0.0001.}

@@ -1,13 +1,17 @@
 Package: reCYCLing
 Type: Package
 Title: Repeat Element Cyclical Evolutionary Simulations in Genomes
-Version: 0.1.0
+Version: 1.0.0
 Author: Grey Monroe [aut, cre]
 Maintainer: Grey Monroe <greymonroe@gmail.com>
-Description: Simulates the evolution of tandem repeat arrays (e.g., satellite
-    DNA-like monomers) through local duplication, distal duplication, chunk
-    deletion, and per-base mutation. Provides visualization tools for
-    repeat fingerprints, monomer diversity, and array composition.
+Description: Simulates the evolution of satellite DNA repeat arrays, from
+    single tandem arrays to whole multi-chromosome genomes, through local
+    (multi-monomer) duplication, long-range duplication, inter-chromosomal
+    exchange, governed deletion, and per-base mutation. Computes a catalog of
+    summary statistics describing monomer arrays (divergence from consensus,
+    identical-pair spatial structure, cross-chromosome sharing, and more) for
+    use in approximate Bayesian computation, and provides visualization tools
+    for repeat fingerprints, monomer diversity, and array composition.
 License: GPL-3
 Encoding: UTF-8
 Imports:
@@ -24,6 +28,6 @@ LinkingTo: Rcpp
 Suggests:
     knitr,
     rmarkdown,
-    shiny
+    testthat
 VignetteBuilder: knitr
 RoxygenNote: 7.3.3
