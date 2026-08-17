@@ -27,7 +27,7 @@ data.table with columns \code{chrom}, \code{num}, \code{bponly},
 \description{
 Reads per-chromosome monomer fastas for ONE taxon / ONE haplotype and
 returns the standard genome data contract used by
-\code{knob_genome_stats()}: one row per monomer with integer chromosome
+\code{repeat_genome_stats()}: one row per monomer with integer chromosome
 rank, within-chromosome position, gapless sequence, orientation, plus the
 gapped sequence (column \code{aligned}) for divergence computation.
 }

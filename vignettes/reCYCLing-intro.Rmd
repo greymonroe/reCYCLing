@@ -257,5 +257,5 @@ ggplot(ent, aes(x = mu, y = H)) +
 | `plot_mutation_load()` | Mutation load histogram |
 | `plot_consensus_support()` | Consensus support histogram |
 | `plot_ps_summary()` | Combined five-panel summary figure |
-| `plot_knob_barcode()` | Linear barcode of a zoom window |
+| `plot_repeat_barcode()` | Linear barcode of a zoom window |
 | `plot_circular_seqcounts()` | Circular base-composition plot |

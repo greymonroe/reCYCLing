@@ -5,9 +5,9 @@
 # comparable.
 #
 # Two levels:
-#   * ARRAY level (schema v2): knob_summary_stats() on one array
+#   * ARRAY level (schema v2): repeat_summary_stats() on one array
 #     (columns bponly, num, dir).
-#   * GENOME level (schema g6): knob_genome_stats() on a multi-chromosome
+#   * GENOME level (schema g6): repeat_genome_stats() on a multi-chromosome
 #     single-haplotype genome (columns chrom, num, bponly, dir) -- the output
 #     of sim_genome() or assemble_genome_dt().
 #
@@ -23,7 +23,7 @@
 #     genuine 0 where absence is informative), never variable length.
 # ============================================================================
 
-KNOB_STATS_VERSION <- "v2"
+REPEAT_STATS_VERSION <- "v2"
 DIV_CUTOFF         <- 22                 # monomer divergence cutoff (subs/monomer)
 DIST_NFINE         <- 80L                # fine distance bins stored in the reftable
 DIST_LOG_MIN       <- 0                  # log10(1)
@@ -131,10 +131,10 @@ dist_fine_hist <- function(dist, nfine = DIST_NFINE) {
 #' @param div_cutoff Monomer divergence filter (substitutions/monomer).
 #' @param nfine Number of fine distance bins.
 #' @param max_per_group Pair-sampling cap per identical group.
-#' @return A named list ("stat object"); see \code{knob_predictors()} to
+#' @return A named list ("stat object"); see \code{repeat_predictors()} to
 #'   flatten it to a numeric vector.
 #' @export
-knob_summary_stats <- function(mono, aligned = NULL, div_cutoff = DIV_CUTOFF,
+repeat_summary_stats <- function(mono, aligned = NULL, div_cutoff = DIV_CUTOFF,
                                nfine = DIST_NFINE, max_per_group = 200L) {
   mono <- as.data.table(mono)
   n_in <- nrow(mono)
@@ -143,7 +143,7 @@ knob_summary_stats <- function(mono, aligned = NULL, div_cutoff = DIV_CUTOFF,
   mono2    <- mono[keep]
   aligned2 <- if (is.null(aligned)) NULL else aligned[keep]
   if (nrow(mono2) < 2L)
-    return(list(version = KNOB_STATS_VERSION, ok = FALSE, n_input = n_in,
+    return(list(version = REPEAT_STATS_VERSION, ok = FALSE, n_input = n_in,
                 array_size = nrow(mono2), n_pairs = 0L, frac_kept = mean(keep),
                 mean_div_bp = NA_real_, frac_redundant = NA_real_, mean_group_size = NA_real_,
                 dist_prop = rep(NA_real_, nfine), div_prop = rep(NA_real_, DIV_NFINE),
@@ -153,7 +153,7 @@ knob_summary_stats <- function(mono, aligned = NULL, div_cutoff = DIV_CUTOFF,
   ps   <- sample_pair_distances(mono2, max_per_group = max_per_group)
   grp  <- mono2[, .N, by = bponly]$N
   list(
-    version         = KNOB_STATS_VERSION, ok = TRUE,
+    version         = REPEAT_STATS_VERSION, ok = TRUE,
     n_input         = n_in,
     array_size      = nrow(mono2),                            # retained = size context
     frac_kept       = mean(keep),
@@ -174,11 +174,11 @@ knob_summary_stats <- function(mono, aligned = NULL, div_cutoff = DIV_CUTOFF,
 #' fine bin count) and appends the scalar statistics. This is the ONLY place
 #' fit-level binning granularity is chosen; reference tables keep fine bins.
 #'
-#' @param stat Output of \code{knob_summary_stats()}.
+#' @param stat Output of \code{repeat_summary_stats()}.
 #' @param K Number of coarse distance bins.
 #' @return Named numeric vector.
 #' @export
-knob_predictors <- function(stat, K = 20L) {
+repeat_predictors <- function(stat, K = 20L) {
   stopifnot(DIST_NFINE %% K == 0L)
   dp <- stat$dist_prop
   cb <- colSums(matrix(dp, nrow = DIST_NFINE %/% K))          # group adjacent fine bins
@@ -196,7 +196,7 @@ knob_predictors <- function(stat, K = 20L) {
 #' combine-inputs alternative and diagnostics; the primary multi-array path
 #' pools posteriors, not stats.
 #'
-#' @param stats List of stat objects from \code{knob_summary_stats()}.
+#' @param stats List of stat objects from \code{repeat_summary_stats()}.
 #' @param weights Optional numeric weights.
 #' @return A pooled stat object.
 #' @export
@@ -208,7 +208,7 @@ combine_summary_stats <- function(stats, weights = NULL) {
   wmean <- function(f) sum(vapply(stats, f, numeric(1)) * w)
   wvec  <- function(f) { M <- vapply(stats, f, numeric(length(stats[[1]]$dist_prop)))
                          as.numeric(M %*% w) }
-  list(version = KNOB_STATS_VERSION, ok = TRUE, n_arrays = length(stats),
+  list(version = REPEAT_STATS_VERSION, ok = TRUE, n_arrays = length(stats),
        array_size = wmean(function(s) s$array_size), n_pairs = sum(vapply(stats, function(s) s$n_pairs, numeric(1))),
        mean_div_bp = wmean(function(s) s$mean_div_bp), frac_redundant = wmean(function(s) s$frac_redundant),
        mean_group_size = wmean(function(s) s$mean_group_size),
@@ -223,13 +223,13 @@ combine_summary_stats <- function(stats, weights = NULL) {
 #' positional index and orientation from fixed fields.
 #'
 #' @param fasta Path to a monomer fasta (possibly gapped/aligned).
-#' @param div_cutoff,nfine Passed to \code{knob_summary_stats()}.
+#' @param div_cutoff,nfine Passed to \code{repeat_summary_stats()}.
 #' @param num_field,dir_field 1-based header fields (split on \code{sep})
 #'   holding the monomer position and strand.
 #' @param sep Header field separator.
 #' @return A stat object.
 #' @export
-knob_stats_from_fasta <- function(fasta, div_cutoff = DIV_CUTOFF, nfine = DIST_NFINE,
+repeat_stats_from_fasta <- function(fasta, div_cutoff = DIV_CUTOFF, nfine = DIST_NFINE,
                                   num_field = 4L, dir_field = 7L, sep = "_") {
   if (!requireNamespace("Biostrings", quietly = TRUE)) stop("need Biostrings")
   dna <- Biostrings::readDNAStringSet(fasta); raw <- as.character(dna)
@@ -237,7 +237,7 @@ knob_stats_from_fasta <- function(fasta, div_cutoff = DIV_CUTOFF, nfine = DIST_N
   mono <- data.table(bponly = gsub("-", "", raw, fixed = TRUE),
                      num = as.numeric(vapply(hd, `[`, "", num_field)),
                      dir = vapply(hd, `[`, "", dir_field))
-  knob_summary_stats(mono, aligned = raw, div_cutoff = div_cutoff, nfine = nfine)
+  repeat_summary_stats(mono, aligned = raw, div_cutoff = div_cutoff, nfine = nfine)
 }
 
 # ============================================================================
@@ -305,7 +305,7 @@ GX_ANC_HAMMING <- 1L                    # ancestral-family substitution band (su
 #'
 #' Reads per-chromosome monomer fastas for ONE taxon / ONE haplotype and
 #' returns the standard genome data contract used by
-#' \code{knob_genome_stats()}: one row per monomer with integer chromosome
+#' \code{repeat_genome_stats()}: one row per monomer with integer chromosome
 #' rank, within-chromosome position, gapless sequence, orientation, plus the
 #' gapped sequence (column \code{aligned}) for divergence computation.
 #'
@@ -384,8 +384,8 @@ assemble_genome_dt <- function(files, chrom_field = 3L, num_field = 4L,
 #' The same function scores simulated (\code{sim_genome()}) and real
 #' (\code{assemble_genome_dt()}) genomes.
 #'
-#' Use \code{knob_genome_predictors()} for the full flattened catalog and
-#' \code{knob_abc_predictors()} for the reduced three-family set designed for
+#' Use \code{repeat_genome_predictors()} for the full flattened catalog and
+#' \code{repeat_abc_predictors()} for the reduced three-family set designed for
 #' ABC fitting.
 #'
 #' @param mono_dt data.table with columns \code{chrom}, \code{num},
@@ -395,7 +395,7 @@ assemble_genome_dt <- function(files, chrom_field = 3L, num_field = 4L,
 #' @param div_cutoff Monomer divergence filter (substitutions/monomer).
 #' @return A named list ("genome stat object").
 #' @export
-knob_genome_stats <- function(mono_dt, aligned = NULL, div_cutoff = DIV_CUTOFF) {
+repeat_genome_stats <- function(mono_dt, aligned = NULL, div_cutoff = DIV_CUTOFF) {
   mono_dt <- as.data.table(mono_dt)
   stopifnot(all(c("chrom", "num", "bponly", "dir") %in% names(mono_dt)))
   mono_dt[, chrom := as.integer(chrom)]
@@ -406,7 +406,7 @@ knob_genome_stats <- function(mono_dt, aligned = NULL, div_cutoff = DIV_CUTOFF) 
   chroms <- sort(unique(mono_dt$chrom))
   n_chrom_in <- length(chroms)
 
-  # ---- per-chromosome within-array stats via knob_summary_stats ---------------
+  # ---- per-chromosome within-array stats via repeat_summary_stats ---------------
   per <- vector("list", length(chroms))
   keep_all <- logical(nrow(mono_dt))               # genome-wide retained mask
   for (i in seq_along(chroms)) {
@@ -414,7 +414,7 @@ knob_genome_stats <- function(mono_dt, aligned = NULL, div_cutoff = DIV_CUTOFF) 
     idx <- which(mono_dt$chrom == cc)
     sub <- mono_dt[idx]
     al  <- if (is.null(aligned)) NULL else aligned[idx]
-    st  <- knob_summary_stats(sub, aligned = al, div_cutoff = div_cutoff)
+    st  <- repeat_summary_stats(sub, aligned = al, div_cutoff = div_cutoff)
     per[[i]] <- st
     # recompute the same div<cutoff keep mask for the genome-wide identity pass
     div0 <- per_monomer_div(sub$bponly, al)
@@ -653,10 +653,10 @@ knob_genome_stats <- function(mono_dt, aligned = NULL, div_cutoff = DIV_CUTOFF) 
 #' the -12 sentinel) so the "no-sharing" region of prior space stays
 #' represented in reference tables.
 #'
-#' @param stat Output of \code{knob_genome_stats()}.
+#' @param stat Output of \code{repeat_genome_stats()}.
 #' @return Named numeric vector (the full statistics catalog).
 #' @export
-knob_genome_predictors <- function(stat) {
+repeat_genome_predictors <- function(stat) {
   na0 <- function(x) ifelse(is.finite(x), x, NA_real_)
   z0  <- function(x) ifelse(is.finite(x), x, 0)
   lg  <- function(x) log10(pmax(na0(x), 1e-12))
@@ -720,12 +720,12 @@ knob_genome_predictors <- function(stat) {
 #' All other catalog statistics are deliberately EXCLUDED from the fit and
 #' remain available as held-out posterior-predictive checks.
 #'
-#' @param stat A genome stat object (\code{knob_genome_stats()}) or an
-#'   already-flattened named vector (\code{knob_genome_predictors()}).
+#' @param stat A genome stat object (\code{repeat_genome_stats()}) or an
+#'   already-flattened named vector (\code{repeat_genome_predictors()}).
 #' @return Named numeric vector of the reduced predictor set.
 #' @export
-knob_abc_predictors <- function(stat) {
-  v <- if (is.list(stat)) knob_genome_predictors(stat) else stat
+repeat_abc_predictors <- function(stat) {
+  v <- if (is.list(stat)) repeat_genome_predictors(stat) else stat
   keep <- c(sprintf("gdv%02d", seq_len(GX_DIVBINS)),
             "mean_div_bp_m", "mean_div_bp_iqr",
             sprintf("wxd%02d", seq_len(GX_NXBINS)),
@@ -734,6 +734,6 @@ knob_abc_predictors <- function(stat) {
             "log_array_size_m", "log_n_chrom")
   missing <- setdiff(keep, names(v))
   if (length(missing))
-    stop("knob_abc_predictors: missing stats: ", paste(missing, collapse = ", "))
+    stop("repeat_abc_predictors: missing stats: ", paste(missing, collapse = ", "))
   v[keep]
 }

@@ -320,7 +320,7 @@ List sim_core_cpp(IntegerVector ancestor_seq_r,
             for (int i = 0; i < init_k0; i++) {
                 arr.emplace_back(ancestor_seq, 1);
             }
-            t = 0;  // reset clock — new knob starts fresh
+            t = 0;  // reset clock — new array starts fresh
             continue;
         }
 

@@ -7,7 +7,7 @@
 combine_summary_stats(stats, weights = NULL)
 }
 \arguments{
-\item{stats}{List of stat objects from \code{knob_summary_stats()}.}
+\item{stats}{List of stat objects from \code{repeat_summary_stats()}.}
 
 \item{weights}{Optional numeric weights.}
 }

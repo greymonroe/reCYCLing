@@ -29,9 +29,9 @@
 #' \dontrun{
 #' sim <- run_sim_ps(n = 1, max_t = 500, mu_total = 3e-5)
 #' ps  <- sim$ps_list[[1]]
-#' plot_knob_barcode(ps, zoom = c(1, 100))
+#' plot_repeat_barcode(ps, zoom = c(1, 100))
 #' }
-plot_knob_barcode <- function(ps,
+plot_repeat_barcode <- function(ps,
                               zoom,
                               palette    = "Dark2",
                               line_width = 2,

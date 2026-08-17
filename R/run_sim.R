@@ -269,7 +269,7 @@
                           init_sequence_type = init_sequence_type,
                           ancestor_seq = ancestor_seq)
       dirs <- rep("+", length(units))
-      t <- 1L  # reset clock — new knob starts fresh
+      t <- 1L  # reset clock — new array starts fresh
     }
 
     res <- .step_generation(
