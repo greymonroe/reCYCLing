@@ -1,0 +1,372 @@
+---
+title: "From monomers to mechanisms: an end-to-end ABC workflow"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{From monomers to mechanisms: an end-to-end ABC workflow}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  fig.width  = 7,
+  fig.height = 4,
+  out.width  = "100%",
+  dpi       = 150
+)
+set.seed(20260817)
+library(data.table)
+library(reCYCLing)
+has_bio   <- requireNamespace("Biostrings", quietly = TRUE)
+has_abcrf <- requireNamespace("abcrf", quietly = TRUE)
+```
+
+## The question, and the workflow
+
+Large tandem repeat arrays — centromeric satellites, knobs, subtelomeric
+repeats — are built by mechanisms nobody can watch directly: tandem
+duplication of multi-monomer units, longer-range duplication within a
+chromosome, and exchange of blocks between chromosomes. What we *can*
+observe is the end product: thousands to millions of monomers whose
+sequences and positions carry a fossil record of those events.
+
+reCYCLing turns that record into inference by simulation. The workflow has
+four steps, and this vignette runs all of them end to end at toy scale:
+
+1. **Observe** — extract per-monomer sequences from real assemblies (e.g.
+   with [TRASH](https://github.com/vlothec/TRASH)) and import them
+   (`assemble_genome_dt()`).
+2. **Describe** — reduce a genome of monomers to a fixed-length vector of
+   summary statistics (`repeat_genome_stats()`, `repeat_abc_predictors()`).
+   The *same* functions score real and simulated genomes, so the two are
+   comparable by construction.
+3. **Simulate** — draw mechanism parameters from priors, evolve simulated
+   genomes (`sim_genome()`), and score them, building a reference table.
+4. **Infer** — use random-forest ABC (the `abcrf` package) for model choice
+   ("is mechanism X present at all?") and parameter posteriors, then check
+   the fit by simulating at the posterior estimates (posterior-predictive
+   check).
+
+Everything below runs in a couple of minutes on a laptop. The final section
+shows how the same code scales to real inference (tens of thousands of
+simulations on a cluster).
+
+## Step 0 — the generative model
+
+`sim_genome()` evolves a multi-chromosome genome of monomers forward in
+time. Each chromosome starts as a small array of identical copies of one
+ancestral monomer and grows toward a target size under:
+
+| Mechanism | Rate parameter | Size parameter |
+|---|---|---|
+| Local (tandem) duplication of a multi-monomer unit | `p_local_dup` (per monomer per generation) | `local_dist` |
+| Long-range duplication within a chromosome | `p_distal_dup` (per chromosome per generation) | `distal_dist` |
+| Inter-chromosomal exchange (copy a block to another chromosome) | `p_translocation` (per genome per generation) | `transloc_chunk_mean` |
+| Point mutation (the molecular clock) | `mu_total` (per base per generation) | — |
+
+A size governor (deletion) keeps each chromosome near its target once
+reached, so arrays keep *turning over* rather than growing without bound —
+the regime real satellite arrays live in.
+
+The output is the package's central **data contract**: a `data.table` with
+one row per monomer and columns `chrom` (integer 1..K), `num` (position
+within the chromosome), `bponly` (gapless sequence), and `dir` (strand).
+
+```{r sim_demo}
+g <- sim_genome(
+  K             = 3,
+  target_sizes  = c(600, 450, 300),
+  n_generations = 250,
+  mu_total      = 5e-5,
+  p_local_dup   = 2.5e-4,
+  local_dist    = list(type = "gamma", shape = 2, scale = 8 / 2),
+  p_distal_dup  = 0.05,
+  distal_dist   = list(type = "gamma", shape = 2, scale = 300 / 2),
+  p_translocation     = 0.2,
+  transloc_chunk_mean = 100
+)
+head(g, 3)
+table(g$chrom)
+```
+
+## Step 1 — observed data
+
+### Real assemblies
+
+For real genomes, run a monomer annotator such as TRASH on each
+chromosome-scale assembly to get one fasta of monomers per chromosome
+(optionally aligned, i.e. gapped). `assemble_genome_dt()` parses the fasta
+headers — split on `sep`, with the chromosome id, monomer position, and
+strand at fixed field positions — and returns the data contract above:
+
+```{r import_real, eval=FALSE}
+files <- list.files("monomers/", pattern = "\\.fasta$", full.names = TRUE)
+obs <- assemble_genome_dt(files,
+                          chrom_field = 3,   # e.g. "sp_hap1_Chr01_00042_..._+"
+                          num_field   = 4,
+                          dir_field   = 7,
+                          sep         = "_")
+```
+
+For a single array (one chromosome) there is a one-call shortcut,
+`repeat_stats_from_fasta()`, which goes straight from fasta to the stat
+object of Step 2.
+
+### A round trip you can run
+
+To show the import path without shipping data, we write one simulated
+chromosome out as a TRASH-style monomer fasta and read it back:
+
+```{r roundtrip, eval=has_bio}
+fa <- tempfile(fileext = ".fasta")
+sub <- g[chrom == 1L]
+writeLines(paste0(">mono_demo_Chr01_", sub$num, "_x_x_", sub$dir, "\n", sub$bponly), fa)
+back <- assemble_genome_dt(fa, chrom_field = 3, num_field = 4, dir_field = 7)
+identical(back$bponly, sub$bponly)
+```
+
+### Pseudo-observed genomes with known truth
+
+For the rest of this vignette we use two simulated genomes as
+"observations", so we know the truth the inference should recover:
+one evolved **with** inter-chromosomal exchange, one **without**.
+
+```{r pseudo_obs}
+make_obs <- function(p_xch, seed) {
+  set.seed(seed)
+  sim_genome(K = 3, target_sizes = c(600, 450, 300), n_generations = 250,
+             mu_total = 5e-5, p_local_dup = 2.5e-4,
+             local_dist  = list(type = "gamma", shape = 2, scale = 8 / 2),
+             p_distal_dup = 0.05,
+             distal_dist = list(type = "gamma", shape = 2, scale = 300 / 2),
+             p_translocation = p_xch, transloc_chunk_mean = 100)
+}
+obs_with    <- make_obs(p_xch = 0.2, seed = 101)  # exchange PRESENT
+obs_without <- make_obs(p_xch = 0,   seed = 102)  # exchange ABSENT
+```
+
+## Step 2 — summary statistics
+
+`repeat_genome_stats()` reduces a genome to a stat object; the two
+flatteners turn it into named numeric vectors:
+
+* `repeat_genome_predictors()` — the **full catalog** (every statistic the
+  package computes, fixed length, NA-safe). Use this for reference tables:
+  storing everything means you can change the fitted subset later without
+  re-simulating, and unfitted statistics become free posterior-predictive
+  checks.
+* `repeat_abc_predictors()` — a curated **fit subset** built from three
+  interpretable families, designed for mechanism inference:
+
+| Family | Statistics | What it measures |
+|---|---|---|
+| Divergence (clock) | `gdv01`–`gdv11`, `mean_div_bp_m` | distribution of monomer divergence from consensus — array age / turnover |
+| Within-chromosome pair distance | `wxd01`–`wxd20` | log-binned distances between identical monomers — local vs long-range duplication |
+| Cross-chromosome sharing | `frac_pairs_xchrom`, `frac_genome_xchrom`, `log_n_xchrom_fam`, `log_xchrom_jacc_mean` | identical monomers shared between chromosomes — exchange |
+| Size context | `log_array_size_m`, `log_n_chrom` | scale of the genome |
+
+```{r stats_demo}
+st <- repeat_genome_stats(obs_with)
+obs_stats <- rbind(
+  with_exchange    = repeat_abc_predictors(st),
+  without_exchange = repeat_abc_predictors(repeat_genome_stats(obs_without))
+)
+length(repeat_genome_predictors(st))   # full catalog
+ncol(obs_stats)                        # fit subset
+round(obs_stats[, c("mean_div_bp_m", "frac_pairs_xchrom", "log_array_size_m")], 3)
+```
+
+The two genomes have the same age and size, but the exchange signal
+(`frac_pairs_xchrom`) separates them already. The inference below
+formalizes that.
+
+## Step 3 — a reference table
+
+Draw parameters from priors, simulate, score. Two design points worth
+copying at any scale:
+
+* **Spike and slab.** Each optional mechanism is switched *off* entirely in
+  a fraction of simulations (here 1/3). That turns "is exchange present?"
+  into a model-choice problem a classification forest can answer.
+* **Store the full catalog** (`repeat_genome_predictors()`), select the fit
+  subset (`repeat_abc_predictors()`) downstream.
+
+```{r reftable, cache=FALSE}
+rlunif <- function(n, lo, hi) 10^runif(n, log10(lo), log10(hi))
+SPIKE <- 1/3
+
+draw_prior <- function() {
+  has_xch <- runif(1) >= SPIKE
+  list(n_generations = round(runif(1, 80, 400)),
+       local_mean    = rlunif(1, 2, 50),
+       p_distal      = rlunif(1, 1e-3, 0.3),
+       distal_mean   = rlunif(1, 50, 1000),
+       p_xch         = if (has_xch) rlunif(1, 1e-2, 0.9) else 0,
+       xch_mean      = if (has_xch) rlunif(1, 10, 500) else NA_real_)
+}
+
+simulate_one <- function(pr) {
+  sim <- sim_genome(K = 3, target_sizes = round(rlunif(3, 200, 800)),
+                    n_generations = pr$n_generations,
+                    mu_total = 5e-5, p_local_dup = 2.5e-4,
+                    local_dist  = list(type = "gamma", shape = 2, scale = pr$local_mean / 2),
+                    p_distal_dup = pr$p_distal,
+                    distal_dist = list(type = "gamma", shape = 2, scale = pr$distal_mean / 2),
+                    p_translocation     = pr$p_xch,
+                    transloc_chunk_mean = if (is.na(pr$xch_mean)) 100 else pr$xch_mean)
+  repeat_abc_predictors(repeat_genome_stats(sim))
+}
+
+N <- 240
+t0 <- Sys.time()
+rows <- lapply(seq_len(N), function(i) {
+  pr <- draw_prior()
+  pred <- tryCatch(simulate_one(pr), error = function(e) NULL)
+  if (is.null(pred)) return(NULL)
+  c(unlist(pr[c("n_generations", "local_mean", "p_xch")]), pred)
+})
+ref <- as.data.table(do.call(rbind, Filter(Negate(is.null), rows)))
+ref <- ref[complete.cases(ref)]
+cat(sprintf("%d usable simulations in %.1f min\n",
+            nrow(ref), as.numeric(Sys.time() - t0, units = "mins")))
+
+# statistics that never vary at this toy scale (fixed K, empty divergence
+# bins) carry no information here — drop them before training
+stat_cols <- setdiff(colnames(ref), c("n_generations", "local_mean", "p_xch"))
+stat_cols <- stat_cols[sapply(ref[, ..stat_cols], sd) > 0]
+```
+
+## Step 4 — inference with random forests
+
+Random-forest ABC (Pudlo et al. 2016; Raynal et al. 2019, both via the
+`abcrf` package) uses the reference table as a training set: a
+classification forest votes on mechanism presence, a regression forest
+estimates parameter posteriors. Forests tolerate many correlated
+statistics, so no statistic pre-selection is needed.
+
+### Model choice: is exchange present?
+
+```{r model_choice, eval=has_abcrf}
+library(abcrf)
+train <- data.frame(mod = factor(ifelse(ref$p_xch > 0, "present", "absent")),
+                    ref[, ..stat_cols])
+obs_df <- data.frame(obs_stats)[, stat_cols]
+
+rf_mc  <- abcrf(mod ~ ., data = train, ntree = 200, paral = FALSE)
+votes  <- predict(rf_mc, obs_df, train, ntree = 200, paral = FALSE)
+data.frame(genome   = rownames(obs_stats),
+           truth    = c("present", "absent"),
+           P_present = round(votes$vote[, "present"] / rowSums(votes$vote), 2))
+```
+
+The forest assigns a high probability of exchange to the genome simulated
+with it and a low one to the genome without — with only
+`r nrow(ref)` training simulations.
+
+### Parameter posteriors
+
+A regression forest per parameter gives posterior medians and credible
+intervals. Here: array age (`n_generations`) and the local duplication
+unit size (`local_mean`), with the known truth alongside.
+
+```{r regression, eval=has_abcrf}
+posterior <- function(param, obs_row) {
+  tr <- data.frame(r = ref[[param]], ref[, ..stat_cols])
+  rf <- regAbcrf(r ~ ., data = tr, ntree = 200, paral = FALSE)
+  pr <- predict(rf, obs_df[obs_row, , drop = FALSE], tr,
+                quantiles = c(0.025, 0.5, 0.975), paral = FALSE)
+  c(median = pr$med[1], lo = pr$quantiles[1], hi = pr$quantiles[3])
+}
+res <- rbind(
+  age_generations = posterior("n_generations", 1),
+  local_mean      = posterior("local_mean", 1)
+)
+cbind(round(res, 1), truth = c(250, 8))
+```
+
+Even this toy table recovers age well (the divergence family is a clock)
+and puts the local unit size in the right range; at real scale (30k
+simulations) both tighten substantially, and cross-validation on held-out
+simulations quantifies exactly how much (see `abcrf::err.regAbcrf` and the
+scaling section below).
+
+## Step 5 — posterior-predictive check
+
+The loop closes by simulating at the inferred values and asking whether the
+result resembles the observation — including in statistics that were
+*never fitted*. Here we overlay the fitted within-chromosome distance
+histogram (`wxd`).
+
+```{r postpred, eval=has_abcrf, fig.height=3.5}
+library(ggplot2)
+sim_pp <- sim_genome(K = 3, target_sizes = c(600, 450, 300),
+                     n_generations = round(res["age_generations", "median"]),
+                     mu_total = 5e-5, p_local_dup = 2.5e-4,
+                     local_dist  = list(type = "gamma", shape = 2,
+                                        scale = res["local_mean", "median"] / 2),
+                     p_distal_dup = 0.05,
+                     distal_dist = list(type = "gamma", shape = 2, scale = 300 / 2),
+                     p_translocation = 0.2, transloc_chunk_mean = 100)
+pp <- repeat_abc_predictors(repeat_genome_stats(sim_pp))
+
+wxd <- grep("^wxd", stat_cols, value = TRUE)
+dt <- rbind(data.table(bin = seq_along(wxd), p = obs_stats["with_exchange", wxd], who = "observed"),
+            data.table(bin = seq_along(wxd), p = pp[wxd], who = "posterior-predictive"))
+ggplot(dt, aes(bin, p, fill = who)) +
+  geom_col(position = "dodge") +
+  labs(x = "log10 identical-pair distance (binned)", y = "proportion of pairs",
+       fill = NULL) +
+  theme_minimal() + theme(legend.position = "top")
+```
+
+A systematic mismatch — especially in held-out statistics — is not a
+failure of the workflow but its most useful output: it points at a
+mechanism the model lacks.
+
+## Scaling to real inference
+
+The toy above is the real pipeline in miniature. At publication scale the
+same calls change only in size and placement:
+
+```{r scale, eval=FALSE}
+## Reference table: ~30,000 simulations, full catalog, on a cluster.
+## One genome per row; checkpoint batches to .rds so preempted jobs resume.
+pred <- repeat_genome_predictors(repeat_genome_stats(sim))   # store EVERYTHING
+
+## Real data: one fit per genome/haplotype.
+obs  <- assemble_genome_dt(chromosome_fastas)                # TRASH monomers
+v    <- repeat_abc_predictors(repeat_genome_stats(obs))
+
+## Inference: abcrf with ntree = 500-1000, parallel;
+## validate with ~1000 held-out simulations as pseudo-observations
+## (parameter recovery, CI coverage, false-positive rate of model choice).
+```
+
+Practices that matter at scale:
+
+* **Fit per genome, then pool.** With several genomes (haplotypes,
+  accessions, species), fit each independently and compare or pool
+  posteriors — independent haplotypes of the same genotype are a built-in
+  replication check.
+* **Hold statistics out.** Fit on the three families above; everything else
+  in the full catalog scores the fit afterwards.
+* **Validate the estimator.** Treat held-out simulations as
+  pseudo-observations: parameter recovery, credible-interval coverage, and
+  — for model choice — how often a truly-absent mechanism reaches the vote
+  level of your real genomes.
+
+## Function reference
+
+| Step | Function | Purpose |
+|---|---|---|
+| Simulate | `sim_genome()` | multi-chromosome genome under the mechanism model |
+| Simulate | `run_sim_ps()` | single array, with identical-pair tracking and plots (see the intro vignette) |
+| Import | `assemble_genome_dt()` | monomer fastas (TRASH-style headers) → genome data contract |
+| Import | `repeat_stats_from_fasta()` | single-array fasta → stat object, one call |
+| Describe | `repeat_genome_stats()` | genome → stat object |
+| Describe | `repeat_genome_predictors()` | stat object → full catalog vector |
+| Describe | `repeat_abc_predictors()` | stat object → curated fit subset |
+| Describe | `repeat_summary_stats()`, `repeat_predictors()` | array-level equivalents |
+| Visualize | `plot_repeat_fingerprint()`, `plot_repeat_barcode()`, `plot_ps_summary()` | array structure plots |

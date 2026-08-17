@@ -26,6 +26,7 @@ Imports:
     stats
 LinkingTo: Rcpp
 Suggests:
+    abcrf,
     Biostrings,
     knitr,
     Matrix,
