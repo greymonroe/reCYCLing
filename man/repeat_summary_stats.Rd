@@ -9,7 +9,8 @@ repeat_summary_stats(
   aligned = NULL,
   div_cutoff = DIV_CUTOFF,
   nfine = DIST_NFINE,
-  max_per_group = 200L
+  max_per_group = 200L,
+  max_total = 60000L
 )
 }
 \arguments{
@@ -22,11 +23,19 @@ repeat_summary_stats(
 
 \item{nfine}{Number of fine distance bins.}
 
-\item{max_per_group}{Pair-sampling cap per identical group.}
+\item{max_per_group}{Pair-sampling cap per identical group. Families whose
+full pair count exceeds this are randomly sampled; raise it to enumerate
+large families exactly (a family of n copies has n(n-1)/2 pairs, so
+\code{max_per_group = 2000} fully enumerates families up to 63 copies and
+caps the per-family work beyond that).}
+
+\item{max_total}{Uniform cap on total pairs kept per array
+(shape-preserving subsample).}
 }
 \value{
 A named list ("stat object"); see \code{repeat_predictors()} to
-  flatten it to a numeric vector.
+  flatten it to a numeric vector. \code{n_pairs} counts sampled pairs;
+  \code{n_pairs_true} is the exact analytic total (uncapped).
 }
 \description{
 Computes the canonical array-level stat object: retained size, mean

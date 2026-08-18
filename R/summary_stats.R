@@ -130,12 +130,20 @@ dist_fine_hist <- function(dist, nfine = DIST_NFINE) {
 #' @param aligned Optional gapped MSA sequences in the same order (real data).
 #' @param div_cutoff Monomer divergence filter (substitutions/monomer).
 #' @param nfine Number of fine distance bins.
-#' @param max_per_group Pair-sampling cap per identical group.
+#' @param max_per_group Pair-sampling cap per identical group. Families whose
+#'   full pair count exceeds this are randomly sampled; raise it to enumerate
+#'   large families exactly (a family of n copies has n(n-1)/2 pairs, so
+#'   \code{max_per_group = 2000} fully enumerates families up to 63 copies and
+#'   caps the per-family work beyond that).
+#' @param max_total Uniform cap on total pairs kept per array
+#'   (shape-preserving subsample).
 #' @return A named list ("stat object"); see \code{repeat_predictors()} to
-#'   flatten it to a numeric vector.
+#'   flatten it to a numeric vector. \code{n_pairs} counts sampled pairs;
+#'   \code{n_pairs_true} is the exact analytic total (uncapped).
 #' @export
 repeat_summary_stats <- function(mono, aligned = NULL, div_cutoff = DIV_CUTOFF,
-                               nfine = DIST_NFINE, max_per_group = 200L) {
+                               nfine = DIST_NFINE, max_per_group = 200L,
+                               max_total = 60000L) {
   mono <- as.data.table(mono)
   n_in <- nrow(mono)
   div0 <- per_monomer_div(mono$bponly, aligned)
@@ -144,13 +152,15 @@ repeat_summary_stats <- function(mono, aligned = NULL, div_cutoff = DIV_CUTOFF,
   aligned2 <- if (is.null(aligned)) NULL else aligned[keep]
   if (nrow(mono2) < 2L)
     return(list(version = REPEAT_STATS_VERSION, ok = FALSE, n_input = n_in,
-                array_size = nrow(mono2), n_pairs = 0L, frac_kept = mean(keep),
+                array_size = nrow(mono2), n_pairs = 0L, n_pairs_true = 0,
+                frac_kept = mean(keep),
                 mean_div_bp = NA_real_, frac_redundant = NA_real_, mean_group_size = NA_real_,
                 dist_prop = rep(NA_real_, nfine), div_prop = rep(NA_real_, DIV_NFINE),
                 div_vals = numeric(0),
                 div_cutoff = div_cutoff))
   div2 <- per_monomer_div(mono2$bponly, aligned2)            # recompute on retained
-  ps   <- sample_pair_distances(mono2, max_per_group = max_per_group)
+  ps   <- sample_pair_distances(mono2, max_per_group = max_per_group,
+                                max_total = max_total)
   grp  <- mono2[, .N, by = bponly]$N
   list(
     version         = REPEAT_STATS_VERSION, ok = TRUE,
@@ -158,6 +168,7 @@ repeat_summary_stats <- function(mono, aligned = NULL, div_cutoff = DIV_CUTOFF,
     array_size      = nrow(mono2),                            # retained = size context
     frac_kept       = mean(keep),
     n_pairs         = nrow(ps),
+    n_pairs_true    = sum(grp * (grp - 1) / 2),              # exact, uncapped
     mean_div_bp     = mean(div2),                             # filtered molecular clock
     frac_redundant  = sum(grp[grp >= 2L]) / nrow(mono2),
     mean_group_size = if (any(grp >= 2L)) mean(grp[grp >= 2L]) else NA_real_,
@@ -393,9 +404,14 @@ assemble_genome_dt <- function(files, chrom_field = 3L, num_field = 4L,
 #' @param aligned Optional gapped MSA sequences matching \code{mono_dt} rows;
 #'   if \code{mono_dt} carries an \code{aligned} column it is used.
 #' @param div_cutoff Monomer divergence filter (substitutions/monomer).
+#' @param max_per_group,max_total Pair-sampling caps passed to
+#'   \code{repeat_summary_stats()} for the per-chromosome distance histograms.
+#'   Defaults reproduce schema g6; raise \code{max_per_group} to weight large
+#'   identical families by their true pair counts.
 #' @return A named list ("genome stat object").
 #' @export
-repeat_genome_stats <- function(mono_dt, aligned = NULL, div_cutoff = DIV_CUTOFF) {
+repeat_genome_stats <- function(mono_dt, aligned = NULL, div_cutoff = DIV_CUTOFF,
+                                max_per_group = 200L, max_total = 60000L) {
   mono_dt <- as.data.table(mono_dt)
   stopifnot(all(c("chrom", "num", "bponly", "dir") %in% names(mono_dt)))
   mono_dt[, chrom := as.integer(chrom)]
@@ -414,7 +430,9 @@ repeat_genome_stats <- function(mono_dt, aligned = NULL, div_cutoff = DIV_CUTOFF
     idx <- which(mono_dt$chrom == cc)
     sub <- mono_dt[idx]
     al  <- if (is.null(aligned)) NULL else aligned[idx]
-    st  <- repeat_summary_stats(sub, aligned = al, div_cutoff = div_cutoff)
+    st  <- repeat_summary_stats(sub, aligned = al, div_cutoff = div_cutoff,
+                                max_per_group = max_per_group,
+                                max_total = max_total)
     per[[i]] <- st
     # recompute the same div<cutoff keep mask for the genome-wide identity pass
     div0 <- per_monomer_div(sub$bponly, al)

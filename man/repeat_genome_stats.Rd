@@ -4,7 +4,13 @@
 \alias{repeat_genome_stats}
 \title{Genome-level summary statistics (schema g6)}
 \usage{
-repeat_genome_stats(mono_dt, aligned = NULL, div_cutoff = DIV_CUTOFF)
+repeat_genome_stats(
+  mono_dt,
+  aligned = NULL,
+  div_cutoff = DIV_CUTOFF,
+  max_per_group = 200L,
+  max_total = 60000L
+)
 }
 \arguments{
 \item{mono_dt}{data.table with columns \code{chrom}, \code{num},
@@ -14,6 +20,11 @@ repeat_genome_stats(mono_dt, aligned = NULL, div_cutoff = DIV_CUTOFF)
 if \code{mono_dt} carries an \code{aligned} column it is used.}
 
 \item{div_cutoff}{Monomer divergence filter (substitutions/monomer).}
+
+\item{max_per_group, max_total}{Pair-sampling caps passed to
+\code{repeat_summary_stats()} for the per-chromosome distance histograms.
+Defaults reproduce schema g6; raise \code{max_per_group} to weight large
+identical families by their true pair counts.}
 }
 \value{
 A named list ("genome stat object").

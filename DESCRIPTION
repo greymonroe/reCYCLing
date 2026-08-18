@@ -1,7 +1,7 @@
 Package: reCYCLing
 Type: Package
 Title: Repeat Element Cyclical Evolutionary Simulations in Genomes
-Version: 1.0.0
+Version: 1.0.1
 Author: Grey Monroe [aut, cre]
 Maintainer: Grey Monroe <greymonroe@gmail.com>
 Description: Simulates the evolution of satellite DNA repeat arrays, from
